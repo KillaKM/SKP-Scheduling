@@ -16,7 +16,7 @@ st.set_page_config(
 def check_password():
     def password_entered():
         # Pas hier eventueel je eigen wachtwoord aan
-        if st.session_state["password"] == "Tantalus2027!":
+        if st.session_state["password"] == "Tantalus2627!":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
@@ -41,7 +41,7 @@ if not check_password():
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload je Excel-bestand ('SKP Schedule 26_27 (BOARD).xlsx')", type=["xlsx"]
+    "Upload je Excel-bestand
 )
 
 LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
