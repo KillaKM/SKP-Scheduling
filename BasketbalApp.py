@@ -899,7 +899,7 @@ if "sheets" in st.session_state:
                         for date_val in unique_dates:
                             st.session_state[f"date_chk_{date_val}"] = select_state
 
-                    st.checkbox("✅ Selecteer Alle Dagen",
+                    st.checkbox("Selecteer Alle Dagen",
                                 key="select_all_days", on_change=toggle_all_days)
 
                     chosen_dates = []
