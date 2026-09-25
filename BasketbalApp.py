@@ -1,6 +1,7 @@
 import copy
 from datetime import datetime
 import io
+import os
 import random
 import re
 import openpyxl
@@ -13,12 +14,9 @@ st.set_page_config(
 )
 
 # --- WACHTWOORDBEVEILIGING ---
-
-
 def check_password():
     def password_entered():
-        # Pas hier eventueel je eigen wachtwoord aan
-        if st.session_state["password"] == "Tantalus2627!":
+        if st.session_state["password"] == "Tantalus2027!":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
@@ -27,17 +25,14 @@ def check_password():
     if "password_correct" not in st.session_state:
         st.title("🔒 Inloggen vereist")
         st.info("Voer het wachtwoord in om toegang te krijgen tot het SKP Taaksysteem.")
-        st.text_input("Wachtwoord:", type="password",
-                      on_change=password_entered, key="password")
+        st.text_input("Wachtwoord:", type="password", on_change=password_entered, key="password")
         return False
     elif not st.session_state["password_correct"]:
         st.title("🔒 Inloggen vereist")
-        st.text_input("Wachtwoord:", type="password",
-                      on_change=password_entered, key="password")
+        st.text_input("Wachtwoord:", type="password", on_change=password_entered, key="password")
         st.error("Onjuist wachtwoord. Probeer het opnieuw.")
         return False
     return True
-
 
 if not check_password():
     st.stop()
@@ -45,12 +40,10 @@ if not check_password():
 
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload je Excel-bestand ('SKP Schedule 26_27 (BOARD).xlsx')", type=["xlsx"]
-)
+DATA_FILE = "current_schedule.xlsx"
+FALLBACK_EXCEL = "SKP Schedule 26_27 (BOARD).xlsx"
 
-LOCK_COLS = ["Lock Ref 1", "Lock Ref 2",
-             "Lock Scorer", "Lock Timer", "Lock 24s"]
+LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
 TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
 
@@ -71,7 +64,7 @@ def make_arrow_compatible(df):
         if col in LOCK_COLS:
             df_clean[col] = df_clean[col].fillna(False).astype(bool)
         elif df_clean[col].dtype == object or str(col) in [
-            "Referee 1", "Referee 2", "Scorer", "Timer",
+            "Referee 1", "Referee 2", "Scorer", "Timer", 
             "24 sec operator", "Home Team", "Away Team", "Division"
         ]:
             df_clean[col] = df_clean[col].fillna("").astype(str)
@@ -110,8 +103,7 @@ def find_col(df, candidates, fallback_index=None):
 
 
 def clean_team_code(team_name):
-    t = str(team_name).lower().replace(
-        "tantalus", "").replace("-", " ").strip()
+    t = str(team_name).lower().replace("tantalus", "").replace("-", " ").strip()
     return "".join(t.split())
 
 
@@ -122,10 +114,8 @@ def build_division_map(divisions_df):
     df = divisions_df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    team_col = find_col(df, ["team", "tantalus team",
-                        "teams", "teamnaam"], fallback_index=0)
-    div_col = find_col(df, ["division", "divisie", "klasse", "poule"],
-                       fallback_index=1 if len(df.columns) > 1 else 0)
+    team_col = find_col(df, ["team", "tantalus team", "teams", "teamnaam"], fallback_index=0)
+    div_col = find_col(df, ["division", "divisie", "klasse", "poule"], fallback_index=1 if len(df.columns) > 1 else 0)
 
     for _, row in df.dropna(subset=[team_col]).iterrows():
         t_val = str(row[team_col]).strip()
@@ -158,18 +148,13 @@ def standardize_players_df(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    col_last = find_col(df, ["last name", "lastname", "achternaam",
-                        "last"], fallback_index=1 if len(df.columns) > 1 else None)
-    col_first = find_col(df, ["first name", "firstname", "voornaam",
-                         "first"], fallback_index=0 if len(df.columns) > 0 else None)
-    col_dip = find_col(df, ["diploma", "licentie", "certificaat"],
-                       fallback_index=2 if len(df.columns) > 2 else None)
+    col_last = find_col(df, ["last name", "lastname", "achternaam", "last"], fallback_index=1 if len(df.columns) > 1 else None)
+    col_first = find_col(df, ["first name", "firstname", "voornaam", "first"], fallback_index=0 if len(df.columns) > 0 else None)
+    col_dip = find_col(df, ["diploma", "licentie", "certificaat"], fallback_index=2 if len(df.columns) > 2 else None)
     col_comm = find_col(df, ["committee", "commissie"])
     col_extra_field = find_col(df, ["extra", "opmerking", "status", "notes"])
-    col_season = find_col(
-        df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "half"])
-    col_extra_pts = find_col(
-        df, ["extra points", "extra punten", "commissie punten", "comm points"])
+    col_season = find_col(df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "half"])
+    col_extra_pts = find_col(df, ["extra points", "extra punten", "commissie punten", "comm points"])
 
     renames = {}
     if col_first and col_first != "First name":
@@ -205,14 +190,12 @@ def standardize_players_df(df):
     if "Extra points" not in df.columns:
         df["Extra points"] = 0.0
     else:
-        df["Extra points"] = pd.to_numeric(
-            df["Extra points"], errors="coerce").fillna(0.0)
+        df["Extra points"] = pd.to_numeric(df["Extra points"], errors="coerce").fillna(0.0)
 
     if "Total points" not in df.columns:
         df["Total points"] = df["Extra points"]
     else:
-        df["Total points"] = pd.to_numeric(
-            df["Total points"], errors="coerce").fillna(df["Extra points"])
+        df["Total points"] = pd.to_numeric(df["Total points"], errors="coerce").fillna(df["Extra points"])
 
     if "Referee" not in df.columns:
         df["Referee"] = 0
@@ -230,8 +213,7 @@ def standardize_skp_df(df, div_map=None):
     col_away = find_col(df, ["away team", "uit team", "away", "uit"])
     col_date = find_col(df, ["date", "datum"])
     col_time = find_col(df, ["time", "tijd"])
-    col_div = find_col(
-        df, ["division", "divisie", "poule", "klasse", "league", "div"])
+    col_div = find_col(df, ["division", "divisie", "poule", "klasse", "league", "div"])
 
     renames = {}
     if col_home and col_home != "Home Team":
@@ -389,8 +371,7 @@ def update_player_stats(sheets_dict):
     comm_points_map = {}
     if not committees_df.empty:
         col_comm = committees_df.columns[0]
-        col_pts = committees_df.columns[-1] if len(
-            committees_df.columns) > 1 else None
+        col_pts = committees_df.columns[-1] if len(committees_df.columns) > 1 else None
         for _, row in committees_df.dropna(subset=[col_comm]).iterrows():
             c_name = str(row[col_comm]).strip()
             try:
@@ -463,8 +444,7 @@ def get_team_player_groups(players_df):
 
 
 def fill_vacated_tasks(skp_df, removed_player_name, valid_pool, busy_slots, tantalus_div_map):
-    task_cols = ["Referee 1", "Referee 2",
-                 "Scorer", "Timer", "24 sec operator"]
+    task_cols = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
     replaced_count = 0
 
     for s_idx in skp_df.index:
@@ -522,10 +502,8 @@ def fill_vacated_tasks(skp_df, removed_player_name, valid_pool, busy_slots, tant
                         elif div_num <= 2 and dip in ["BS3", "L3", "L4"]:
                             priority = 10
 
-                    asst_penalty = 1 if cand.get(
-                        "is_assistant_coach", False) else 0
-                    candidates.append(
-                        (asst_penalty, cand["Extra points"], priority, cand_name))
+                    asst_penalty = 1 if cand.get("is_assistant_coach", False) else 0
+                    candidates.append((asst_penalty, cand["Extra points"], priority, cand_name))
 
                 candidates.sort(key=lambda x: (x[0], x[1], -x[2]))
                 if candidates:
@@ -536,61 +514,81 @@ def fill_vacated_tasks(skp_df, removed_player_name, valid_pool, busy_slots, tant
     return skp_df, replaced_count
 
 
+def save_sheets_to_server(sheets_dict, file_path=DATA_FILE):
+    """Slaat het volledige werkboek centraal op de server op."""
+    clean_dict = {}
+    for sheet_name, df in sheets_dict.items():
+        df_copy = df.copy()
+        for col_l in LOCK_COLS:
+            if col_l in df_copy.columns:
+                df_copy = df_copy.drop(columns=[col_l])
+        clean_dict[sheet_name] = df_copy
+
+    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+        for sheet_name, df_clean in clean_dict.items():
+            df_clean.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
+# --- AUTOMATISCH INLADEN VAN HET CENTRALE BESTAND ---
+file_to_load = None
 if uploaded_file is not None:
-    if "original_sheets" not in st.session_state or st.sidebar.button("🔄 Bestand opnieuw inlezen"):
-        file_bytes = uploaded_file.getvalue()
-        st.session_state["file_bytes"] = file_bytes
+    file_to_load = uploaded_file.getvalue()
+    save_sheets_to_server_on_upload = True
+elif "file_bytes" not in st.session_state:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "rb") as f:
+            file_to_load = f.read()
+    elif os.path.exists(FALLBACK_EXCEL):
+        with open(FALLBACK_EXCEL, "rb") as f:
+            file_to_load = f.read()
 
-        xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        raw_sheets = {}
-        for sheet in xls.sheet_names:
-            df = xls.parse(sheet)
-            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(
-                str).str.contains("^Unnamed")]
+if file_to_load is not None and ("original_sheets" not in st.session_state or st.sidebar.button("🔄 Bestand opnieuw inlezen")):
+    st.session_state["file_bytes"] = file_to_load
 
-        div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
-        div_map = build_division_map(
-            raw_sheets[div_sheet_name]) if div_sheet_name else {}
+    xls = pd.ExcelFile(io.BytesIO(file_to_load))
+    raw_sheets = {}
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
 
-        orig_sheets = {}
-        for sheet, df in raw_sheets.items():
-            if "player" in sheet.lower():
-                df = standardize_players_df(df)
-            elif "skp" in sheet.lower() and "player" not in sheet.lower():
-                df = standardize_skp_df(df, div_map=div_map)
-                task_cols = ["Referee 1", "Referee 2",
-                             "Scorer", "Timer", "24 sec operator"]
-                for col in task_cols:
-                    if col in df.columns:
-                        df[col] = df[col].fillna("").astype(
-                            str).replace({"nan": "", "None": ""})
-            orig_sheets[sheet] = df
+    div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
+    div_map = build_division_map(raw_sheets[div_sheet_name]) if div_sheet_name else {}
 
-        st.session_state["original_sheets"] = orig_sheets
-        st.session_state["sheets"] = copy.deepcopy(orig_sheets)
-        st.session_state["changelog"] = []
-        st.session_state["indeling_gedaan"] = False
-        st.session_state["wb_original"] = openpyxl.load_workbook(
-            io.BytesIO(file_bytes))
+    orig_sheets = {}
+    for sheet, df in raw_sheets.items():
+        if "player" in sheet.lower():
+            df = standardize_players_df(df)
+        elif "skp" in sheet.lower() and "player" not in sheet.lower():
+            df = standardize_skp_df(df, div_map=div_map)
+            for col in TASK_COLS:
+                if col in df.columns:
+                    df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+        orig_sheets[sheet] = df
+
+    st.session_state["original_sheets"] = orig_sheets
+    st.session_state["sheets"] = copy.deepcopy(orig_sheets)
+    st.session_state["changelog"] = []
+    st.session_state["indeling_gedaan"] = False
+    st.session_state["wb_original"] = openpyxl.load_workbook(io.BytesIO(file_to_load))
+    save_sheets_to_server(st.session_state["sheets"])
+
 
 if "sheets" in st.session_state:
     sheets = st.session_state["sheets"]
 
-    players_key = find_sheet(
-        sheets, ["Players skp", "Players", "Spelers"]) or "Players"
+    players_key = find_sheet(sheets, ["Players skp", "Players", "Spelers"]) or "Players"
     skp_key = find_sheet(sheets, ["SKP", "Rooster"]) or "SKP"
     comm_key = find_sheet(sheets, ["Committees", "Commissies"]) or "Committees"
-    all_games_key = find_sheet(
-        sheets, ["All games", "all games", "ALL GAMES"]) or "all games"
+    all_games_key = find_sheet(sheets, ["All games", "all games", "ALL GAMES"]) or "all games"
     div_key = find_sheet(sheets, ["Divisions", "Divisies"]) or "Divisions"
 
     divisions_df = sheets.get(div_key, pd.DataFrame())
     tantalus_div_map = build_division_map(divisions_df)
 
     if skp_key in sheets:
-        sheets[skp_key] = standardize_skp_df(
-            sheets[skp_key], div_map=tantalus_div_map)
+        sheets[skp_key] = standardize_skp_df(sheets[skp_key], div_map=tantalus_div_map)
 
+    # Toon feedbackmelding indien een actie is uitgevoerd
     if "action_feedback" in st.session_state and st.session_state["action_feedback"]:
         msg_type, msg_text = st.session_state["action_feedback"]
         if msg_type == "success":
@@ -634,6 +632,7 @@ if "sheets" in st.session_state:
     if not edited_df.equals(sheets[selected_tab]):
         sheets[selected_tab] = edited_df
         sheets = update_player_stats(sheets)
+        save_sheets_to_server(sheets)
         st.rerun()
 
     # --- 1. MENU: LEDENBEHEER PER TEAM ---
@@ -642,30 +641,24 @@ if "sheets" in st.session_state:
         if players_key in sheets:
             players_manage_df = standardize_players_df(sheets[players_key])
             team_groups_manage = get_team_player_groups(players_manage_df)
-            team_names_list = [
-                t for t in team_groups_manage.keys() if t != "Overig / Geen Team"]
+            team_names_list = [t for t in team_groups_manage.keys() if t != "Overig / Geen Team"]
             if not team_names_list:
                 team_names_list = list(team_groups_manage.keys())
 
-            action_member = st.radio(
-                "Actie:", ["➕ Lid Toevoegen", "✏️ Lid Wijzigen", "🗑️ Lid Verwijderen"])
+            action_member = st.radio("Actie:", ["➕ Lid Toevoegen", "✏️ Lid Wijzigen", "🗑️ Lid Verwijderen"])
 
             if action_member == "➕ Lid Toevoegen":
-                target_team = st.selectbox(
-                    "Selecteer Team:", team_names_list, key="add_mem_team")
+                target_team = st.selectbox("Selecteer Team:", team_names_list, key="add_mem_team")
                 new_first_name = st.text_input("Voornaam:", key="add_mem_fn")
                 new_last_name = st.text_input("Achternaam:", key="add_mem_ln")
-                new_dip = st.selectbox(
-                    "Diploma:", ["", "BS1", "BS2", "BS3", "L3", "L4"], key="add_mem_dip")
-                new_season = st.selectbox(
-                    "Seizoen:", ["Full season", "First half", "Second half"], key="add_mem_season")
+                new_dip = st.selectbox("Diploma:", ["", "BS1", "BS2", "BS3", "L3", "L4"], key="add_mem_dip")
+                new_season = st.selectbox("Seizoen:", ["Full season", "First half", "Second half"], key="add_mem_season")
 
                 if st.button("➕ Voeg Lid Toe Aan Team"):
                     if not new_first_name or not new_last_name:
                         st.error("Vul voornaam en achternaam in.")
                     else:
-                        target_indices = team_groups_manage.get(
-                            target_team, [])
+                        target_indices = team_groups_manage.get(target_team, [])
                         new_row_data = {
                             "First name": new_first_name.strip(),
                             "Last name": new_last_name.strip(),
@@ -687,11 +680,11 @@ if "sheets" in st.session_state:
                         df_top = players_manage_df.iloc[:insert_at]
                         df_bottom = players_manage_df.iloc[insert_at:]
                         new_member_df = pd.DataFrame([new_row_data])
-                        updated_players_res = pd.concat(
-                            [df_top, new_member_df, df_bottom], ignore_index=True)
+                        updated_players_res = pd.concat([df_top, new_member_df, df_bottom], ignore_index=True)
 
                         sheets[players_key] = updated_players_res
                         sheets = update_player_stats(sheets)
+                        save_sheets_to_server(sheets)
                         st.session_state["changelog"].append({
                             "Actie": "Lid Toegevoegd",
                             "Details": f"{new_first_name} {new_last_name} toegevoegd aan {target_team}.",
@@ -703,63 +696,47 @@ if "sheets" in st.session_state:
                         st.rerun()
 
             elif action_member == "✏️ Lid Wijzigen":
-                edit_team = st.selectbox(
-                    "Selecteer Team:", team_names_list, key="edit_mem_team")
+                edit_team = st.selectbox("Selecteer Team:", team_names_list, key="edit_mem_team")
                 edit_indices = team_groups_manage.get(edit_team, [])
                 if edit_indices:
                     edit_player_dict = {}
                     for idx_m in edit_indices:
-                        fn = str(
-                            players_manage_df.at[idx_m, "First name"]).strip()
-                        ln = str(
-                            players_manage_df.at[idx_m, "Last name"]).strip()
+                        fn = str(players_manage_df.at[idx_m, "First name"]).strip()
+                        ln = str(players_manage_df.at[idx_m, "Last name"]).strip()
                         edit_player_dict[f"{fn} {ln}"] = idx_m
 
-                    selected_edit_name = st.selectbox("Selecteer lid om te bewerken:", list(
-                        edit_player_dict.keys()), key="edit_mem_name")
+                    selected_edit_name = st.selectbox("Selecteer lid om te bewerken:", list(edit_player_dict.keys()), key="edit_mem_name")
                     idx_to_edit = edit_player_dict[selected_edit_name]
 
-                    curr_fn = str(
-                        players_manage_df.at[idx_to_edit, "First name"])
-                    curr_ln = str(
-                        players_manage_df.at[idx_to_edit, "Last name"])
-                    curr_dip = str(
-                        players_manage_df.at[idx_to_edit, "Diploma"]).strip().upper()
-                    curr_season = str(
-                        players_manage_df.at[idx_to_edit, "Full/ half season"]).strip()
+                    curr_fn = str(players_manage_df.at[idx_to_edit, "First name"])
+                    curr_ln = str(players_manage_df.at[idx_to_edit, "Last name"])
+                    curr_dip = str(players_manage_df.at[idx_to_edit, "Diploma"]).strip().upper()
+                    curr_season = str(players_manage_df.at[idx_to_edit, "Full/ half season"]).strip()
 
                     dip_options = ["", "BS1", "BS2", "BS3", "L3", "L4"]
-                    dip_idx = dip_options.index(
-                        curr_dip) if curr_dip in dip_options else 0
+                    dip_idx = dip_options.index(curr_dip) if curr_dip in dip_options else 0
 
-                    season_options = ["Full season",
-                                      "First half", "Second half"]
+                    season_options = ["Full season", "First half", "Second half"]
                     season_idx = 0
                     for s_i, s_opt in enumerate(season_options):
                         if s_opt.lower() in curr_season.lower():
                             season_idx = s_i
                             break
 
-                    up_fn = st.text_input(
-                        "Voornaam:", value=curr_fn, key="up_mem_fn")
-                    up_ln = st.text_input(
-                        "Achternaam:", value=curr_ln, key="up_mem_ln")
-                    up_dip = st.selectbox(
-                        "Diploma:", dip_options, index=dip_idx, key="up_mem_dip")
-                    up_season = st.selectbox(
-                        "Seizoen:", season_options, index=season_idx, key="up_mem_season")
+                    up_fn = st.text_input("Voornaam:", value=curr_fn, key="up_mem_fn")
+                    up_ln = st.text_input("Achternaam:", value=curr_ln, key="up_mem_ln")
+                    up_dip = st.selectbox("Diploma:", dip_options, index=dip_idx, key="up_mem_dip")
+                    up_season = st.selectbox("Seizoen:", season_options, index=season_idx, key="up_mem_season")
 
                     if st.button("💾 Sla Wijzigingen Lid Op"):
-                        players_manage_df.at[idx_to_edit,
-                                             "First name"] = up_fn.strip()
-                        players_manage_df.at[idx_to_edit,
-                                             "Last name"] = up_ln.strip()
+                        players_manage_df.at[idx_to_edit, "First name"] = up_fn.strip()
+                        players_manage_df.at[idx_to_edit, "Last name"] = up_ln.strip()
                         players_manage_df.at[idx_to_edit, "Diploma"] = up_dip
-                        players_manage_df.at[idx_to_edit,
-                                             "Full/ half season"] = up_season
+                        players_manage_df.at[idx_to_edit, "Full/ half season"] = up_season
 
                         sheets[players_key] = players_manage_df
                         sheets = update_player_stats(sheets)
+                        save_sheets_to_server(sheets)
                         st.session_state["changelog"].append({
                             "Actie": "Lid Gewijzigd",
                             "Details": f"{up_fn} {up_ln} ({edit_team}): diploma={up_dip}, seizoen={up_season}.",
@@ -773,29 +750,23 @@ if "sheets" in st.session_state:
                     st.info("Geen leden gevonden in dit team.")
 
             else:
-                del_team = st.selectbox(
-                    "Selecteer Team:", team_names_list, key="del_mem_team")
+                del_team = st.selectbox("Selecteer Team:", team_names_list, key="del_mem_team")
                 del_indices = team_groups_manage.get(del_team, [])
                 if del_indices:
                     del_player_dict = {}
                     for idx_m in del_indices:
-                        fn = str(
-                            players_manage_df.at[idx_m, "First name"]).strip()
-                        ln = str(
-                            players_manage_df.at[idx_m, "Last name"]).strip()
+                        fn = str(players_manage_df.at[idx_m, "First name"]).strip()
+                        ln = str(players_manage_df.at[idx_m, "Last name"]).strip()
                         del_player_dict[f"{fn} {ln}"] = idx_m
 
-                    selected_del_name = st.selectbox("Selecteer lid om te verwijderen:", list(
-                        del_player_dict.keys()), key="del_mem_name")
+                    selected_del_name = st.selectbox("Selecteer lid om te verwijderen:", list(del_player_dict.keys()), key="del_mem_name")
                     if st.button("🗑️ Verwijder Dit Lid Definitief"):
                         idx_to_del = del_player_dict[selected_del_name]
-                        updated_players_res = players_manage_df.drop(
-                            index=idx_to_del).reset_index(drop=True)
+                        updated_players_res = players_manage_df.drop(index=idx_to_del).reset_index(drop=True)
                         sheets[players_key] = updated_players_res
 
                         skp_df_del = sheets.get(skp_key, pd.DataFrame())
-                        all_games_df = sheets.get(
-                            all_games_key, pd.DataFrame())
+                        all_games_df = sheets.get(all_games_key, pd.DataFrame())
                         if not all_games_df.empty:
                             all_games_df = standardize_skp_df(all_games_df)
                         busy_slots = build_team_busy_slots(all_games_df)
@@ -809,8 +780,7 @@ if "sheets" in st.session_state:
                                 if f_val and f_val not in ["nan", "", "none", "None"]:
                                     curr_t = f_val
                             else:
-                                player_team_map[f"{f_val} {l_val}".strip(
-                                )] = curr_t
+                                player_team_map[f"{f_val} {l_val}".strip()] = curr_t
 
                         diploma_ranking = {
                             "L4": 5, "L3": 4, "BS3": 3, "BS2": 2, "BS1": 1, "nan": 0, "": 0
@@ -820,10 +790,8 @@ if "sheets" in st.session_state:
                         for idx_p, p_row in updated_players_res.iterrows():
                             l_val = str(p_row.get("Last name", "")).strip()
                             f_val = str(p_row.get("First name", "")).strip()
-                            extra_field_val = str(
-                                p_row.get("Extra", "")).strip().lower()
-                            comm_field_val = str(
-                                p_row.get("Committee", "")).strip().lower()
+                            extra_field_val = str(p_row.get("Extra", "")).strip().lower()
+                            comm_field_val = str(p_row.get("Committee", "")).strip().lower()
                             combined_roles = f"{extra_field_val} {comm_field_val}"
 
                             if l_val in ["nan", "", "none", "None"] or "recreational for now" in combined_roles:
@@ -831,19 +799,16 @@ if "sheets" in st.session_state:
 
                             is_assistant_coach = "assistant coach" in combined_roles
                             is_board = "board" in combined_roles or "bestuur" in combined_roles
-                            is_head_coach = (
-                                "coach" in combined_roles) and not is_assistant_coach
+                            is_head_coach = ("coach" in combined_roles) and not is_assistant_coach
 
                             if is_board or is_head_coach:
                                 continue
 
                             full_name = f"{f_val} {l_val}".strip()
-                            d_val = str(p_row.get("Diploma", "")).strip(
-                            ).upper().replace(" ", "").replace("-", "")
+                            d_val = str(p_row.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
                             rank = diploma_ranking.get(d_val, 0)
                             team = player_team_map.get(full_name, "")
-                            season_type = str(
-                                p_row.get("Full/ half season", "Full season")).strip()
+                            season_type = str(p_row.get("Full/ half season", "Full season")).strip()
                             try:
                                 extra_p = float(p_row.get("Extra points", 0.0))
                             except:
@@ -864,6 +829,7 @@ if "sheets" in st.session_state:
                         )
                         sheets[skp_key] = make_arrow_compatible(skp_df_del)
                         sheets = update_player_stats(sheets)
+                        save_sheets_to_server(sheets)
 
                         st.session_state["changelog"].append({
                             "Actie": "Lid Verwijderd & Rooster Hersteld",
@@ -882,25 +848,22 @@ if "sheets" in st.session_state:
     target_match_indices = []
 
     with st.sidebar.expander("📅 Rooster Indelen & Beheer", expanded=True):
-        scope_mode = st.radio("Toepassen op:", [
-                              "Per dag(en)", "Per regel (specifieke wedstrijd)"], key="scope_mode")
+        scope_mode = st.radio("Toepassen op:", ["Per dag(en)", "Per regel (specifieke wedstrijd)"], key="scope_mode")
 
         st.markdown("#### 1. Indeling Toepassen")
         if skp_key in sheets:
             skp_df_ctrl = sheets[skp_key]
-
+            
             if scope_mode == "Per dag(en)":
                 if "Date" in skp_df_ctrl.columns:
                     unique_dates = list(skp_df_ctrl["Date"].dropna().unique())
 
                     def toggle_all_days():
-                        select_state = st.session_state.get(
-                            "select_all_days", False)
+                        select_state = st.session_state.get("select_all_days", False)
                         for date_val in unique_dates:
                             st.session_state[f"date_chk_{date_val}"] = select_state
 
-                    st.checkbox("✅ Selecteer Alle Dagen",
-                                key="select_all_days", on_change=toggle_all_days)
+                    st.checkbox("✅ Selecteer Alle Dagen", key="select_all_days", on_change=toggle_all_days)
 
                     chosen_dates = []
                     for date_val in unique_dates:
@@ -910,8 +873,7 @@ if "sheets" in st.session_state:
                         if st.checkbox(str(date_val), key=chk_key):
                             chosen_dates.append(date_val)
 
-                    chosen_dates_norm = {
-                        normalize_date_str(d) for d in chosen_dates}
+                    chosen_dates_norm = {normalize_date_str(d) for d in chosen_dates}
                     for idx_r in skp_df_ctrl.index:
                         if normalize_date_str(skp_df_ctrl.at[idx_r, "Date"]) in chosen_dates_norm:
                             target_match_indices.append(idx_r)
@@ -922,102 +884,82 @@ if "sheets" in st.session_state:
                     t = str(r_val.get("Time", ""))
                     h = str(r_val.get("Home Team", ""))
                     a = str(r_val.get("Away Team", ""))
-                    row_choices.append(
-                        (idx_r, f"Rij {idx_r + 1}: {d} ({t}) - {h} vs {a}"))
-                sel_row_idx = st.selectbox("Kies wedstrijd:", [
-                                           r[0] for r in row_choices], format_func=lambda x: dict(row_choices)[x], key="sel_row_assign")
+                    row_choices.append((idx_r, f"Rij {idx_r + 1}: {d} ({t}) - {h} vs {a}"))
+                sel_row_idx = st.selectbox("Kies wedstrijd:", [r[0] for r in row_choices], format_func=lambda x: dict(row_choices)[x], key="sel_row_assign")
                 target_match_indices = [sel_row_idx]
 
-            max_tasks_per_day = st.slider(
-                "Max. taken per speler per dag", 1, 4, 2)
+            max_tasks_per_day = st.slider("Max. taken per speler per dag", 1, 4, 2)
             start_auto_btn = st.button("🤖 Start indeling voor selectie")
 
         st.divider()
         st.markdown("#### 2. Indeling Wissen")
         if scope_mode == "Per dag(en)":
-            reset_mode = st.radio(
-                "Kies wis-modus:", ["Hele rooster wissen", "Indeling per dag wissen"], key="reset_mode_radio")
+            reset_mode = st.radio("Kies wis-modus:", ["Hele rooster wissen", "Indeling per dag wissen"], key="reset_mode_radio")
 
             if reset_mode == "Hele rooster wissen":
                 if st.button("🗑️ Wis het hele rooster (excl. 🔒)", key="btn_clear_all"):
                     if skp_key in sheets:
                         skp_df_w = sheets[skp_key]
-                        task_cols_to_clear = [
-                            "Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+                        task_cols_to_clear = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
                         for t_c in task_cols_to_clear:
                             l_col = LOCK_MAP[t_c]
                             if t_c in skp_df_w.columns:
                                 for i in skp_df_w.index:
-                                    is_locked = bool(
-                                        skp_df_w.at[i, l_col]) if l_col in skp_df_w.columns else False
+                                    is_locked = bool(skp_df_w.at[i, l_col]) if l_col in skp_df_w.columns else False
                                     if not is_locked:
                                         skp_df_w.at[i, t_c] = ""
                         sheets[skp_key] = make_arrow_compatible(skp_df_w)
                         sheets = update_player_stats(sheets)
-                        st.session_state["changelog"].append(
-                            {"Actie": "Rooster Wissen", "Details": "Hele rooster gewist (met behoud van vastgezette taken)."})
-                        st.session_state["action_feedback"] = (
-                            "info", "Het volledige rooster is succesvol gewist (vastgezette taken zijn behouden).")
+                        save_sheets_to_server(sheets)
+                        st.session_state["changelog"].append({"Actie": "Rooster Wissen", "Details": "Hele rooster gewist (met behoud van vastgezette taken)."})
+                        st.session_state["action_feedback"] = ("info", "Het volledige rooster is succesvol gewist (vastgezette taken zijn behouden).")
                         st.rerun()
             else:
                 if skp_key in sheets:
                     skp_df_temp = sheets[skp_key]
                     if "Date" in skp_df_temp.columns:
-                        reset_dates_list = list(
-                            skp_df_temp["Date"].dropna().unique())
-                        selected_reset_date = st.selectbox(
-                            "Selecteer te wissen dag:", reset_dates_list, key="sel_reset_date")
+                        reset_dates_list = list(skp_df_temp["Date"].dropna().unique())
+                        selected_reset_date = st.selectbox("Selecteer te wissen dag:", reset_dates_list, key="sel_reset_date")
                         if st.button(f"🗑️ Wis dag {selected_reset_date}", key="btn_clear_day"):
-                            d_reset_norm = normalize_date_str(
-                                selected_reset_date)
-                            mask_reset = skp_df_temp["Date"].apply(
-                                normalize_date_str) == d_reset_norm
-                            task_cols_to_clear = [
-                                "Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+                            d_reset_norm = normalize_date_str(selected_reset_date)
+                            mask_reset = skp_df_temp["Date"].apply(normalize_date_str) == d_reset_norm
+                            task_cols_to_clear = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
                             for idx_r in skp_df_temp[mask_reset].index:
                                 for t_c in task_cols_to_clear:
                                     l_col = LOCK_MAP[t_c]
                                     if t_c in skp_df_temp.columns:
-                                        is_locked = bool(
-                                            skp_df_temp.at[idx_r, l_col]) if l_col in skp_df_temp.columns else False
+                                        is_locked = bool(skp_df_temp.at[idx_r, l_col]) if l_col in skp_df_temp.columns else False
                                         if not is_locked:
                                             skp_df_temp.at[idx_r, t_c] = ""
-                            sheets[skp_key] = make_arrow_compatible(
-                                skp_df_temp)
+                            sheets[skp_key] = make_arrow_compatible(skp_df_temp)
                             sheets = update_player_stats(sheets)
-                            st.session_state["changelog"].append(
-                                {"Actie": "Rooster Wissen", "Details": f"Indeling voor {selected_reset_date} gewist."})
-                            st.session_state["action_feedback"] = (
-                                "info", f"De indeling voor {selected_reset_date} is succesvol gewist.")
+                            save_sheets_to_server(sheets)
+                            st.session_state["changelog"].append({"Actie": "Rooster Wissen", "Details": f"Indeling voor {selected_reset_date} gewist."})
+                            st.session_state["action_feedback"] = ("info", f"De indeling voor {selected_reset_date} is succesvol gewist.")
                             st.rerun()
         else:
             if skp_key in sheets:
-                sel_row_to_clear = st.selectbox("Kies wedstrijd om te wissen:", [
-                                                r[0] for r in row_choices], format_func=lambda x: dict(row_choices)[x], key="sel_row_clear")
+                sel_row_to_clear = st.selectbox("Kies wedstrijd om te wissen:", [r[0] for r in row_choices], format_func=lambda x: dict(row_choices)[x], key="sel_row_clear")
                 if st.button(f"🗑️ Wis alleen Rij {sel_row_to_clear + 1}", key="btn_clear_row"):
                     skp_df_row = sheets[skp_key]
-                    task_cols_to_clear = [
-                        "Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+                    task_cols_to_clear = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
                     for t_c in task_cols_to_clear:
                         l_col = LOCK_MAP[t_c]
                         if t_c in skp_df_row.columns:
-                            is_locked = bool(
-                                skp_df_row.at[sel_row_to_clear, l_col]) if l_col in skp_df_row.columns else False
+                            is_locked = bool(skp_df_row.at[sel_row_to_clear, l_col]) if l_col in skp_df_row.columns else False
                             if not is_locked:
                                 skp_df_row.at[sel_row_to_clear, t_c] = ""
                     sheets[skp_key] = make_arrow_compatible(skp_df_row)
                     sheets = update_player_stats(sheets)
-                    st.session_state["changelog"].append(
-                        {"Actie": "Regel Gewist", "Details": f"Taken in rij {sel_row_to_clear + 1} gewist."})
-                    st.session_state["action_feedback"] = (
-                        "info", f"De taken voor rij {sel_row_to_clear + 1} zijn gewist.")
+                    save_sheets_to_server(sheets)
+                    st.session_state["changelog"].append({"Actie": "Regel Gewist", "Details": f"Taken in rij {sel_row_to_clear + 1} gewist."})
+                    st.session_state["action_feedback"] = ("info", f"De taken voor rij {sel_row_to_clear + 1} zijn gewist.")
                     st.rerun()
 
     # --- UITVOEREN VAN AUTOMATISCHE INDELING ---
     if "start_auto_btn" in locals() and start_auto_btn:
         if not target_match_indices:
-            st.session_state["action_feedback"] = (
-                "warning", "Geen wedstrijden geselecteerd om in te delen.")
+            st.session_state["action_feedback"] = ("warning", "Geen wedstrijden geselecteerd om in te delen.")
             st.rerun()
         else:
             sheets = update_player_stats(sheets)
@@ -1030,11 +972,9 @@ if "sheets" in st.session_state:
 
             for col in ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]:
                 if col in skp_df.columns:
-                    skp_df[col] = skp_df[col].fillna("").astype(
-                        str).replace({"nan": "", "None": ""})
+                    skp_df[col] = skp_df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
 
-            players_df = standardize_players_df(
-                sheets.get(players_key, pd.DataFrame()))
+            players_df = standardize_players_df(sheets.get(players_key, pd.DataFrame()))
 
             player_team_map = {}
             current_team = ""
@@ -1057,10 +997,8 @@ if "sheets" in st.session_state:
                 l_val = str(p_row.get("Last name", "")).strip()
                 f_val = str(p_row.get("First name", "")).strip()
                 if l_val not in ["nan", "", "none", "None"]:
-                    extra_field_val = str(
-                        p_row.get("Extra", "")).strip().lower()
-                    comm_field_val = str(
-                        p_row.get("Committee", "")).strip().lower()
+                    extra_field_val = str(p_row.get("Extra", "")).strip().lower()
+                    comm_field_val = str(p_row.get("Committee", "")).strip().lower()
                     combined_roles = f"{extra_field_val} {comm_field_val}"
 
                     if "recreational for now" in combined_roles:
@@ -1068,19 +1006,16 @@ if "sheets" in st.session_state:
 
                     is_assistant_coach = "assistant coach" in combined_roles
                     is_board = "board" in combined_roles or "bestuur" in combined_roles
-                    is_head_coach = (
-                        "coach" in combined_roles) and not is_assistant_coach
+                    is_head_coach = ("coach" in combined_roles) and not is_assistant_coach
 
                     if is_board or is_head_coach:
                         continue
 
                     full_name = f"{f_val} {l_val}".strip()
-                    d_val = str(p_row.get("Diploma", "")).strip(
-                    ).upper().replace(" ", "").replace("-", "")
+                    d_val = str(p_row.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
                     rank = diploma_ranking.get(d_val, 0)
                     team = player_team_map.get(full_name, "")
-                    season_type = str(
-                        p_row.get("Full/ half season", "Full season")).strip()
+                    season_type = str(p_row.get("Full/ half season", "Full season")).strip()
 
                     try:
                         extra = float(p_row.get("Extra points", 0.0))
@@ -1104,8 +1039,7 @@ if "sheets" in st.session_state:
             for idx in target_match_indices:
                 for col_c in ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]:
                     l_col = LOCK_MAP[col_c]
-                    is_locked = bool(
-                        skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+                    is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
                     if col_c in skp_df.columns and not is_locked:
                         curr_v = str(skp_df.at[idx, col_c]).strip()
                         if curr_v.lower() != "x":
@@ -1118,7 +1052,7 @@ if "sheets" in st.session_state:
             player_busy_times = {p: set() for p in valid_players_dict}
             player_day_task_counts = {p: {} for p in valid_players_dict}
 
-            # Tel reeds bezette / vastgezette taken mee
+            # Tel reeds bezette taken mee
             for _, row in skp_df.iterrows():
                 d_val = normalize_date_str(row.get("Date"))
                 t_val = normalize_time_str(row.get("Time"))
@@ -1128,15 +1062,13 @@ if "sheets" in st.session_state:
                     if name in ref_tasks_counter:
                         ref_tasks_counter[name] += 1
                         player_busy_times[name].add((d_val, t_val))
-                        player_day_task_counts[name][d_val] = player_day_task_counts[name].get(
-                            d_val, 0) + 1
+                        player_day_task_counts[name][d_val] = player_day_task_counts[name].get(d_val, 0) + 1
                 for col in ["Scorer", "Timer", "24 sec operator"]:
                     name = str(row.get(col, "")).strip()
                     if name in table_tasks_counter:
                         table_tasks_counter[name] += 1
                         player_busy_times[name].add((d_val, t_val))
-                        player_day_task_counts[name][d_val] = player_day_task_counts[name].get(
-                            d_val, 0) + 1
+                        player_day_task_counts[name][d_val] = player_day_task_counts[name].get(d_val, 0) + 1
 
             def get_row_div_val(r_idx):
                 h_t = str(skp_df.at[r_idx, "Home Team"])
@@ -1155,8 +1087,7 @@ if "sheets" in st.session_state:
                 d_norm = normalize_date_str(m_date)
                 m_time = skp_df.at[idx, "Time"]
                 t_norm = normalize_time_str(m_time)
-                div_num = determine_division_for_team(
-                    home_team, tantalus_div_map)
+                div_num = determine_division_for_team(home_team, tantalus_div_map)
                 skp_df.at[idx, "Division"] = f"Division {div_num}"
 
                 assigned_in_match = {
@@ -1165,13 +1096,11 @@ if "sheets" in st.session_state:
                 }
 
                 # --- SCHEIDSRECHTERS ---
-                is_mse1 = "mse 1" in clean_team_code(
-                    home_team) or "mse1" in clean_team_code(home_team)
+                is_mse1 = "mse 1" in clean_team_code(home_team) or "mse1" in clean_team_code(home_team)
                 if div_num != 1 and not is_mse1:
                     for ref_col in ["Referee 1", "Referee 2"]:
                         l_col = LOCK_MAP[ref_col]
-                        is_locked = bool(
-                            skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+                        is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
                         if is_locked:
                             continue
 
@@ -1188,17 +1117,14 @@ if "sheets" in st.session_state:
 
                                 diploma = player["Diploma"]
 
-                                # Regel: BS3 mag alleen 2e divisie fluiten
                                 if diploma == "BS3" and div_num != 2:
                                     continue
 
-                                # Regel: Aurelie fluit alleen wedstrijden van mannen in 2e divisie
                                 if "aurelie" in p_name.lower():
                                     if not ("mse" in home_team.lower() or "mse" in away_team.lower()) or div_num != 2:
                                         continue
 
-                                is_asst = player.get(
-                                    "is_assistant_coach", False)
+                                is_asst = player.get("is_assistant_coach", False)
                                 c_tasks = ref_tasks_counter[p_name]
                                 if is_asst and c_tasks >= 1:
                                     continue
@@ -1207,8 +1133,7 @@ if "sheets" in st.session_state:
                                     continue
 
                                 p_team = player["Team"]
-                                total_pts = player["Extra points"] + \
-                                    (c_tasks * 2)
+                                total_pts = player["Extra points"] + (c_tasks * 2)
 
                                 if (d_norm, t_norm) in player_busy_times[p_name]:
                                     continue
@@ -1217,8 +1142,7 @@ if "sheets" in st.session_state:
                                 if p_name in assigned_in_match:
                                     continue
 
-                                day_count = player_day_task_counts[p_name].get(
-                                    d_norm, 0)
+                                day_count = player_day_task_counts[p_name].get(d_norm, 0)
                                 over_day_penalty = 1 if day_count >= max_tasks_per_day else 0
 
                                 eligible = False
@@ -1242,8 +1166,7 @@ if "sheets" in st.session_state:
                                         eligible = True
                                         priority = 2
                                 elif div_num == 3:
-                                    already_higher = any(valid_players_dict[a]["Diploma"] in [
-                                                         "L3", "L4"] for a in assigned_in_match if a in valid_players_dict)
+                                    already_higher = any(valid_players_dict[a]["Diploma"] in ["L3", "L4"] for a in assigned_in_match if a in valid_players_dict)
                                     if not already_higher:
                                         if diploma in ["L3", "L4"]:
                                             eligible = True
@@ -1265,8 +1188,7 @@ if "sheets" in st.session_state:
                                             eligible = True
                                             priority = 2
                                 elif div_num == 2:
-                                    already_l3 = any(valid_players_dict[a]["Diploma"] in [
-                                                     "L3", "L4"] for a in assigned_in_match if a in valid_players_dict)
+                                    already_l3 = any(valid_players_dict[a]["Diploma"] in ["L3", "L4"] for a in assigned_in_match if a in valid_players_dict)
                                     if not already_l3:
                                         if diploma in ["L3", "L4"]:
                                             eligible = True
@@ -1295,8 +1217,7 @@ if "sheets" in st.session_state:
                                             priority = 1
 
                                 if eligible:
-                                    over_cap_penalty = 1 if (
-                                        total_pts >= 15.0 or player["Extra points"] >= 12.0) else 0
+                                    over_cap_penalty = 1 if (total_pts >= 15.0 or player["Extra points"] >= 12.0) else 0
                                     asst_penalty = 1 if is_asst else 0
 
                                     ref_candidates.append({
@@ -1324,15 +1245,13 @@ if "sheets" in st.session_state:
                                 skp_df.at[idx, ref_col] = chosen
                                 assigned_in_match.add(chosen)
                                 player_busy_times[chosen].add((d_norm, t_norm))
-                                player_day_task_counts[chosen][d_norm] = player_day_task_counts[chosen].get(
-                                    d_norm, 0) + 1
+                                player_day_task_counts[chosen][d_norm] = player_day_task_counts[chosen].get(d_norm, 0) + 1
                                 ref_tasks_counter[chosen] += 1
 
                 # --- TAFELTAKEN ---
                 for col in ["Scorer", "Timer", "24 sec operator"]:
                     l_col = LOCK_MAP[col]
-                    is_locked = bool(
-                        skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+                    is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
                     if is_locked:
                         continue
 
@@ -1360,11 +1279,9 @@ if "sheets" in st.session_state:
                                 if p_name in assigned_in_match:
                                     continue
 
-                                day_count = player_day_task_counts[p_name].get(
-                                    d_norm, 0)
+                                day_count = player_day_task_counts[p_name].get(d_norm, 0)
                                 over_day_penalty = 1 if day_count >= max_tasks_per_day else 0
-                                over_cap_penalty = 1 if (
-                                    total_pts >= 15.0 or player["Extra points"] >= 12.0) else 0
+                                over_cap_penalty = 1 if (total_pts >= 15.0 or player["Extra points"] >= 12.0) else 0
 
                                 duty_candidates.append({
                                     "name": p_name,
@@ -1387,15 +1304,14 @@ if "sheets" in st.session_state:
                                 skp_df.at[idx, col] = chosen
                                 assigned_in_match.add(chosen)
                                 player_busy_times[chosen].add((d_norm, t_norm))
-                                player_day_task_counts[chosen][d_norm] = player_day_task_counts[chosen].get(
-                                    d_norm, 0) + 1
+                                player_day_task_counts[chosen][d_norm] = player_day_task_counts[chosen].get(d_norm, 0) + 1
                                 table_tasks_counter[chosen] += 1
 
             sheets[skp_key] = make_arrow_compatible(skp_df)
             sheets = update_player_stats(sheets)
+            save_sheets_to_server(sheets)
             st.session_state["indeling_gedaan"] = True
-            st.session_state["action_feedback"] = (
-                "success", "Indeling succesvol uitgevoerd voor de geselecteerde wedstrijden!")
+            st.session_state["action_feedback"] = ("success", "Indeling succesvol uitgevoerd voor de geselecteerde wedstrijden!")
             st.rerun()
 
     # --- 3. MENU: COMMISSIES TOEWIJZEN ---
@@ -1413,8 +1329,7 @@ if "sheets" in st.session_state:
                 pts = 0.0
             comm_points_map_lookup[str(c_row[col_comm]).strip()] = pts
 
-        available_committees = [
-            str(c).strip() for c in comm_df[col_comm].dropna().unique() if str(c).strip()]
+        available_committees = [str(c).strip() for c in comm_df[col_comm].dropna().unique() if str(c).strip()]
         players_df = standardize_players_df(sheets[players_key])
         team_player_groups = get_team_player_groups(players_df)
 
@@ -1432,8 +1347,7 @@ if "sheets" in st.session_state:
                         if raw_comm in ["nan", "None", "none", ""]:
                             current_comms_list = []
                         else:
-                            current_comms_list = [c.strip() for c in raw_comm.split(
-                                ",") if c.strip() in available_committees]
+                            current_comms_list = [c.strip() for c in raw_comm.split(",") if c.strip() in available_committees]
 
                         selected_comms = st.multiselect(
                             f"{f_name} {l_name}",
@@ -1441,8 +1355,7 @@ if "sheets" in st.session_state:
                             default=current_comms_list,
                             key=f"comm_multi_{idx}_{f_name}_{l_name}",
                         )
-                        players_df.at[idx, "Committee"] = ", ".join(
-                            selected_comms)
+                        players_df.at[idx, "Committee"] = ", ".join(selected_comms)
 
             if st.button("💾 Sla Commissies op & Synchroniseer Rooster"):
                 sheets[players_key] = players_df
@@ -1464,10 +1377,8 @@ if "sheets" in st.session_state:
                 for idx, p_row in updated_p_df.iterrows():
                     l_val = str(p_row.get("Last name", "")).strip()
                     f_val = str(p_row.get("First name", "")).strip()
-                    extra_field_val = str(
-                        p_row.get("Extra", "")).strip().lower()
-                    comm_field_val = str(
-                        p_row.get("Committee", "")).strip().lower()
+                    extra_field_val = str(p_row.get("Extra", "")).strip().lower()
+                    comm_field_val = str(p_row.get("Committee", "")).strip().lower()
                     combined_roles = f"{extra_field_val} {comm_field_val}"
 
                     if l_val in ["nan", "", "none", "None"] or "recreational for now" in combined_roles:
@@ -1475,19 +1386,16 @@ if "sheets" in st.session_state:
 
                     is_assistant_coach = "assistant coach" in combined_roles
                     is_board = "board" in combined_roles or "bestuur" in combined_roles
-                    is_head_coach = (
-                        "coach" in combined_roles) and not is_assistant_coach
+                    is_head_coach = ("coach" in combined_roles) and not is_assistant_coach
 
                     if is_board or is_head_coach:
                         continue
 
                     full_name = f"{f_val} {l_val}".strip()
-                    d_val = str(p_row.get("Diploma", "")).strip(
-                    ).upper().replace(" ", "").replace("-", "")
+                    d_val = str(p_row.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
                     rank = diploma_ranking.get(d_val, 0)
                     team = player_team_map.get(full_name, "")
-                    season_type = str(
-                        p_row.get("Full/ half season", "Full season")).strip()
+                    season_type = str(p_row.get("Full/ half season", "Full season")).strip()
                     try:
                         extra_p = float(p_row.get("Extra points", 0.0))
                     except:
@@ -1504,8 +1412,7 @@ if "sheets" in st.session_state:
                     }
 
                 relieved_actions = []
-                task_cols = ["Referee 1", "Referee 2",
-                             "Scorer", "Timer", "24 sec operator"]
+                task_cols = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 
                 for s_idx, s_row in skp_df_sync.iterrows():
                     m_date = str(s_row.get("Date", ""))
@@ -1514,8 +1421,7 @@ if "sheets" in st.session_state:
                     t_norm = normalize_time_str(m_time)
                     h_team = str(s_row.get("Home Team", ""))
                     a_team = str(s_row.get("Away Team", ""))
-                    div_num = determine_division_for_team(
-                        h_team, tantalus_div_map)
+                    div_num = determine_division_for_team(h_team, tantalus_div_map)
 
                     for t_col in task_cols:
                         l_col = LOCK_MAP[t_col]
@@ -1526,8 +1432,7 @@ if "sheets" in st.session_state:
                             p_info = valid_pool[assigned_player]
                             if p_info["Extra points"] >= 12.0:
                                 skp_df_sync.at[s_idx, t_col] = ""
-                                relieved_actions.append(
-                                    f"{assigned_player} ({t_col} op {d_norm})")
+                                relieved_actions.append(f"{assigned_player} ({t_col} op {d_norm})")
 
                                 is_ref = "Referee" in t_col
                                 candidates = []
@@ -1572,34 +1477,37 @@ if "sheets" in st.session_state:
                                         elif div_num <= 2 and dip in ["BS3", "L3", "L4"]:
                                             priority = 10
 
-                                    asst_penalty = 1 if cand.get(
-                                        "is_assistant_coach", False) else 0
-                                    candidates.append(
-                                        (asst_penalty, cand["Extra points"], priority, cand_name))
+                                    asst_penalty = 1 if cand.get("is_assistant_coach", False) else 0
+                                    candidates.append((asst_penalty, cand["Extra points"], priority, cand_name))
 
-                                candidates.sort(
-                                    key=lambda x: (x[0], x[1], -x[2]))
+                                candidates.sort(key=lambda x: (x[0], x[1], -x[2]))
                                 if candidates:
                                     replacement = candidates[0][3]
                                     skp_df_sync.at[s_idx, t_col] = replacement
 
                 sheets[skp_key] = make_arrow_compatible(skp_df_sync)
                 sheets = update_player_stats(sheets)
+                save_sheets_to_server(sheets)
 
                 st.session_state["changelog"].append({
                     "Actie": "Commissies Opgeslagen & Rooster Gesynchroniseerd",
                     "Details": f"Rooster direct herverdeeld. Ontlast en vervangen: {', '.join(relieved_actions) if relieved_actions else 'Geen actieve taken hoeven wijzigen'}.",
                 })
-                st.session_state["action_feedback"] = (
-                    "success", "Commissies zijn opgeslagen en het rooster is direct gesynchroniseerd!")
+                st.session_state["action_feedback"] = ("success", "Commissies zijn opgeslagen en het rooster is direct gesynchroniseerd!")
                 st.rerun()
+
+    # --- CENTRAAL OPSLAAN KNOP IN SIDEBAR ---
+    st.sidebar.divider()
+    if st.sidebar.button("☁️ Wijzigingen centraal opslaan voor iedereen"):
+        save_sheets_to_server(sheets)
+        st.session_state["action_feedback"] = ("success", "Alle wijzigingen zijn succesvol centraal opgeslagen op de server!")
+        st.rerun()
 
     # --- DOWNLOAD & OVERZICHT ---
     st.sidebar.divider()
     st.sidebar.header("💾 Opslaan & Downloaden")
 
-    wb_download = openpyxl.load_workbook(
-        io.BytesIO(st.session_state["file_bytes"]))
+    wb_download = openpyxl.load_workbook(io.BytesIO(st.session_state["file_bytes"]))
     for ws in wb_download.worksheets:
         if hasattr(ws, "tables"):
             ws.tables.clear()
@@ -1617,8 +1525,7 @@ if "sheets" in st.session_state:
                 for c_idx, val in enumerate(row_data, start=1):
                     cell = ws.cell(row=r_idx, column=c_idx)
                     if not isinstance(cell, MergedCell):
-                        cell.value = None if (
-                            pd.isna(val) or val == "") else val
+                        cell.value = None if (pd.isna(val) or val == "") else val
 
     output_buffer = io.BytesIO()
     wb_download.save(output_buffer)
@@ -1651,8 +1558,7 @@ if "sheets" in st.session_state:
                 key="orig_select",
             )
             st.dataframe(
-                make_arrow_compatible(
-                    st.session_state["original_sheets"][orig_tab_select]),
+                make_arrow_compatible(st.session_state["original_sheets"][orig_tab_select]),
                 width="stretch",
             )
 
@@ -1661,8 +1567,7 @@ if "sheets" in st.session_state:
             up_tab_select = st.selectbox(
                 "Kies sheet (Geüpdatet)", list(sheets.keys()), key="up_select"
             )
-            st.dataframe(make_arrow_compatible(
-                sheets[up_tab_select]), width="stretch")
+            st.dataframe(make_arrow_compatible(sheets[up_tab_select]), width="stretch")
 
         with tab_log:
             st.warning("Chronologisch logboek van uitgevoerde acties:")
