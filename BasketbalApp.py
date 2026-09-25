@@ -1674,5 +1674,5 @@ if "sheets" in st.session_state:
 
 else:
     st.warning(
-        "👈 Upload aan de linkerkant je Excel-bestand om te beginnen"
+        "👈 Upload bestand om te beginnen"
     )
