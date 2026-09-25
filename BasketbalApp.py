@@ -936,7 +936,7 @@ if "sheets" in st.session_state:
         st.markdown("#### 2. Indeling Wissen")
         if scope_mode == "Per dag(en)":
             reset_mode = st.radio(
-                "Kies wis-modus:", ["Hele rooster wissen", "Indeling per dag wissen"], key="reset_mode_radio")
+                "Kies modus:", ["Hele rooster wissen", "Indeling per dag wissen"], key="reset_mode_radio")
 
             if reset_mode == "Hele rooster wissen":
                 if st.button("🗑️ Wis het hele rooster (excl. 🔒)", key="btn_clear_all"):
@@ -966,8 +966,8 @@ if "sheets" in st.session_state:
                         reset_dates_list = list(
                             skp_df_temp["Date"].dropna().unique())
                         selected_reset_date = st.selectbox(
-                            "Selecteer te wissen dag:", reset_dates_list, key="sel_reset_date")
-                        if st.button(f"🗑️ Wis dag {selected_reset_date}", key="btn_clear_day"):
+                            "Selecteer dag:", reset_dates_list, key="sel_reset_date")
+                        if st.button(f"🗑️ Wis {selected_reset_date}", key="btn_clear_day"):
                             d_reset_norm = normalize_date_str(
                                 selected_reset_date)
                             mask_reset = skp_df_temp["Date"].apply(
