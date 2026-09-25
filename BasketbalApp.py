@@ -13,6 +13,19 @@ st.set_page_config(
     page_title="SKP Schedule & Task Automation", layout="wide"
 )
 
+# 1. Definieer de file_uploader en constanten ALTIJD eerst
+uploaded_file = st.sidebar.file_uploader(
+    "Upload je Excel-bestand ('SKP Schedule 26_27 (BOARD).xlsx')", type=["xlsx"]
+)
+
+DATA_FILE = "current_schedule.xlsx"
+FALLBACK_EXCEL = "SKP Schedule 26_27 (BOARD).xlsx"
+
+LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
+TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
+
+
 # --- WACHTWOORDBEVEILIGING ---
 def check_password():
     def password_entered():
@@ -39,13 +52,6 @@ if not check_password():
 # ------------------------------
 
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
-
-DATA_FILE = "current_schedule.xlsx"
-FALLBACK_EXCEL = "SKP Schedule 26_27 (BOARD).xlsx"
-
-LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
-TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
-LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
 
 
 def ensure_lock_columns(df):
@@ -515,7 +521,6 @@ def fill_vacated_tasks(skp_df, removed_player_name, valid_pool, busy_slots, tant
 
 
 def save_sheets_to_server(sheets_dict, file_path=DATA_FILE):
-    """Slaat het volledige werkboek centraal op de server op."""
     clean_dict = {}
     for sheet_name, df in sheets_dict.items():
         df_copy = df.copy()
@@ -529,11 +534,10 @@ def save_sheets_to_server(sheets_dict, file_path=DATA_FILE):
             df_clean.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
-# --- AUTOMATISCH INLADEN VAN HET CENTRALE BESTAND ---
+# --- AUTOMATISCH INLADEN VAN HET BESTAND ---
 file_to_load = None
 if uploaded_file is not None:
     file_to_load = uploaded_file.getvalue()
-    save_sheets_to_server_on_upload = True
 elif "file_bytes" not in st.session_state:
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "rb") as f:
@@ -588,7 +592,6 @@ if "sheets" in st.session_state:
     if skp_key in sheets:
         sheets[skp_key] = standardize_skp_df(sheets[skp_key], div_map=tantalus_div_map)
 
-    # Toon feedbackmelding indien een actie is uitgevoerd
     if "action_feedback" in st.session_state and st.session_state["action_feedback"]:
         msg_type, msg_text = st.session_state["action_feedback"]
         if msg_type == "success":
