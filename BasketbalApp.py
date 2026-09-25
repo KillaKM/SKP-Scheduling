@@ -1,7 +1,6 @@
 import copy
 from datetime import datetime
 import io
-import os
 import random
 import re
 import openpyxl
@@ -13,22 +12,10 @@ st.set_page_config(
     page_title="SKP Schedule & Task Automation", layout="wide"
 )
 
-# 1. Definieer de file_uploader en constanten ALTIJD eerst
-uploaded_file = st.sidebar.file_uploader(
-    "Upload je Excel-bestand ('SKP Schedule 26_27 (BOARD).xlsx')", type=["xlsx"]
-)
-
-DATA_FILE = "current_schedule.xlsx"
-FALLBACK_EXCEL = "SKP Schedule 26_27 (BOARD).xlsx"
-
-LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
-TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
-LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
-
-
 # --- WACHTWOORDBEVEILIGING ---
 def check_password():
     def password_entered():
+        # Pas hier eventueel je eigen wachtwoord aan
         if st.session_state["password"] == "Tantalus2027!":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -52,6 +39,14 @@ if not check_password():
 # ------------------------------
 
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload je Excel-bestand ('SKP Schedule 26_27 (BOARD).xlsx')", type=["xlsx"]
+)
+
+LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
+TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
 
 
 def ensure_lock_columns(df):
@@ -520,62 +515,37 @@ def fill_vacated_tasks(skp_df, removed_player_name, valid_pool, busy_slots, tant
     return skp_df, replaced_count
 
 
-def save_sheets_to_server(sheets_dict, file_path=DATA_FILE):
-    clean_dict = {}
-    for sheet_name, df in sheets_dict.items():
-        df_copy = df.copy()
-        for col_l in LOCK_COLS:
-            if col_l in df_copy.columns:
-                df_copy = df_copy.drop(columns=[col_l])
-        clean_dict[sheet_name] = df_copy
-
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        for sheet_name, df_clean in clean_dict.items():
-            df_clean.to_excel(writer, sheet_name=sheet_name, index=False)
-
-
-# --- AUTOMATISCH INLADEN VAN HET BESTAND ---
-file_to_load = None
 if uploaded_file is not None:
-    file_to_load = uploaded_file.getvalue()
-elif "file_bytes" not in st.session_state:
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "rb") as f:
-            file_to_load = f.read()
-    elif os.path.exists(FALLBACK_EXCEL):
-        with open(FALLBACK_EXCEL, "rb") as f:
-            file_to_load = f.read()
+    if "original_sheets" not in st.session_state or st.sidebar.button("🔄 Bestand opnieuw inlezen"):
+        file_bytes = uploaded_file.getvalue()
+        st.session_state["file_bytes"] = file_bytes
 
-if file_to_load is not None and ("original_sheets" not in st.session_state or st.sidebar.button("🔄 Bestand opnieuw inlezen")):
-    st.session_state["file_bytes"] = file_to_load
+        xls = pd.ExcelFile(io.BytesIO(file_bytes))
+        raw_sheets = {}
+        for sheet in xls.sheet_names:
+            df = xls.parse(sheet)
+            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
 
-    xls = pd.ExcelFile(io.BytesIO(file_to_load))
-    raw_sheets = {}
-    for sheet in xls.sheet_names:
-        df = xls.parse(sheet)
-        raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
+        div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
+        div_map = build_division_map(raw_sheets[div_sheet_name]) if div_sheet_name else {}
 
-    div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
-    div_map = build_division_map(raw_sheets[div_sheet_name]) if div_sheet_name else {}
+        orig_sheets = {}
+        for sheet, df in raw_sheets.items():
+            if "player" in sheet.lower():
+                df = standardize_players_df(df)
+            elif "skp" in sheet.lower() and "player" not in sheet.lower():
+                df = standardize_skp_df(df, div_map=div_map)
+                task_cols = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
+                for col in task_cols:
+                    if col in df.columns:
+                        df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+            orig_sheets[sheet] = df
 
-    orig_sheets = {}
-    for sheet, df in raw_sheets.items():
-        if "player" in sheet.lower():
-            df = standardize_players_df(df)
-        elif "skp" in sheet.lower() and "player" not in sheet.lower():
-            df = standardize_skp_df(df, div_map=div_map)
-            for col in TASK_COLS:
-                if col in df.columns:
-                    df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
-        orig_sheets[sheet] = df
-
-    st.session_state["original_sheets"] = orig_sheets
-    st.session_state["sheets"] = copy.deepcopy(orig_sheets)
-    st.session_state["changelog"] = []
-    st.session_state["indeling_gedaan"] = False
-    st.session_state["wb_original"] = openpyxl.load_workbook(io.BytesIO(file_to_load))
-    save_sheets_to_server(st.session_state["sheets"])
-
+        st.session_state["original_sheets"] = orig_sheets
+        st.session_state["sheets"] = copy.deepcopy(orig_sheets)
+        st.session_state["changelog"] = []
+        st.session_state["indeling_gedaan"] = False
+        st.session_state["wb_original"] = openpyxl.load_workbook(io.BytesIO(file_bytes))
 
 if "sheets" in st.session_state:
     sheets = st.session_state["sheets"]
@@ -635,7 +605,6 @@ if "sheets" in st.session_state:
     if not edited_df.equals(sheets[selected_tab]):
         sheets[selected_tab] = edited_df
         sheets = update_player_stats(sheets)
-        save_sheets_to_server(sheets)
         st.rerun()
 
     # --- 1. MENU: LEDENBEHEER PER TEAM ---
@@ -687,7 +656,6 @@ if "sheets" in st.session_state:
 
                         sheets[players_key] = updated_players_res
                         sheets = update_player_stats(sheets)
-                        save_sheets_to_server(sheets)
                         st.session_state["changelog"].append({
                             "Actie": "Lid Toegevoegd",
                             "Details": f"{new_first_name} {new_last_name} toegevoegd aan {target_team}.",
@@ -739,7 +707,6 @@ if "sheets" in st.session_state:
 
                         sheets[players_key] = players_manage_df
                         sheets = update_player_stats(sheets)
-                        save_sheets_to_server(sheets)
                         st.session_state["changelog"].append({
                             "Actie": "Lid Gewijzigd",
                             "Details": f"{up_fn} {up_ln} ({edit_team}): diploma={up_dip}, seizoen={up_season}.",
@@ -832,7 +799,6 @@ if "sheets" in st.session_state:
                         )
                         sheets[skp_key] = make_arrow_compatible(skp_df_del)
                         sheets = update_player_stats(sheets)
-                        save_sheets_to_server(sheets)
 
                         st.session_state["changelog"].append({
                             "Actie": "Lid Verwijderd & Rooster Hersteld",
@@ -913,7 +879,6 @@ if "sheets" in st.session_state:
                                         skp_df_w.at[i, t_c] = ""
                         sheets[skp_key] = make_arrow_compatible(skp_df_w)
                         sheets = update_player_stats(sheets)
-                        save_sheets_to_server(sheets)
                         st.session_state["changelog"].append({"Actie": "Rooster Wissen", "Details": "Hele rooster gewist (met behoud van vastgezette taken)."})
                         st.session_state["action_feedback"] = ("info", "Het volledige rooster is succesvol gewist (vastgezette taken zijn behouden).")
                         st.rerun()
@@ -936,7 +901,6 @@ if "sheets" in st.session_state:
                                             skp_df_temp.at[idx_r, t_c] = ""
                             sheets[skp_key] = make_arrow_compatible(skp_df_temp)
                             sheets = update_player_stats(sheets)
-                            save_sheets_to_server(sheets)
                             st.session_state["changelog"].append({"Actie": "Rooster Wissen", "Details": f"Indeling voor {selected_reset_date} gewist."})
                             st.session_state["action_feedback"] = ("info", f"De indeling voor {selected_reset_date} is succesvol gewist.")
                             st.rerun()
@@ -954,7 +918,6 @@ if "sheets" in st.session_state:
                                 skp_df_row.at[sel_row_to_clear, t_c] = ""
                     sheets[skp_key] = make_arrow_compatible(skp_df_row)
                     sheets = update_player_stats(sheets)
-                    save_sheets_to_server(sheets)
                     st.session_state["changelog"].append({"Actie": "Regel Gewist", "Details": f"Taken in rij {sel_row_to_clear + 1} gewist."})
                     st.session_state["action_feedback"] = ("info", f"De taken voor rij {sel_row_to_clear + 1} zijn gewist.")
                     st.rerun()
@@ -1055,7 +1018,7 @@ if "sheets" in st.session_state:
             player_busy_times = {p: set() for p in valid_players_dict}
             player_day_task_counts = {p: {} for p in valid_players_dict}
 
-            # Tel reeds bezette taken mee
+            # Tel reeds bezette / vastgezette taken mee
             for _, row in skp_df.iterrows():
                 d_val = normalize_date_str(row.get("Date"))
                 t_val = normalize_time_str(row.get("Time"))
@@ -1120,9 +1083,11 @@ if "sheets" in st.session_state:
 
                                 diploma = player["Diploma"]
 
+                                # Regel: BS3 mag alleen 2e divisie fluiten
                                 if diploma == "BS3" and div_num != 2:
                                     continue
 
+                                # Regel: Aurelie fluit alleen wedstrijden van mannen in 2e divisie
                                 if "aurelie" in p_name.lower():
                                     if not ("mse" in home_team.lower() or "mse" in away_team.lower()) or div_num != 2:
                                         continue
@@ -1312,7 +1277,6 @@ if "sheets" in st.session_state:
 
             sheets[skp_key] = make_arrow_compatible(skp_df)
             sheets = update_player_stats(sheets)
-            save_sheets_to_server(sheets)
             st.session_state["indeling_gedaan"] = True
             st.session_state["action_feedback"] = ("success", "Indeling succesvol uitgevoerd voor de geselecteerde wedstrijden!")
             st.rerun()
@@ -1490,7 +1454,6 @@ if "sheets" in st.session_state:
 
                 sheets[skp_key] = make_arrow_compatible(skp_df_sync)
                 sheets = update_player_stats(sheets)
-                save_sheets_to_server(sheets)
 
                 st.session_state["changelog"].append({
                     "Actie": "Commissies Opgeslagen & Rooster Gesynchroniseerd",
@@ -1498,13 +1461,6 @@ if "sheets" in st.session_state:
                 })
                 st.session_state["action_feedback"] = ("success", "Commissies zijn opgeslagen en het rooster is direct gesynchroniseerd!")
                 st.rerun()
-
-    # --- CENTRAAL OPSLAAN KNOP IN SIDEBAR ---
-    st.sidebar.divider()
-    if st.sidebar.button("☁️ Wijzigingen centraal opslaan voor iedereen"):
-        save_sheets_to_server(sheets)
-        st.session_state["action_feedback"] = ("success", "Alle wijzigingen zijn succesvol centraal opgeslagen op de server!")
-        st.rerun()
 
     # --- DOWNLOAD & OVERZICHT ---
     st.sidebar.divider()
