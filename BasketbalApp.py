@@ -12,6 +12,37 @@ st.set_page_config(
     page_title="SKP Schedule & Task Automation", layout="wide"
 )
 
+# --- WACHTWOORDBEVEILIGING ---
+
+
+def check_password():
+    def password_entered():
+        # Pas hier eventueel je eigen wachtwoord aan
+        if st.session_state["password"] == "Tantalus2627!":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.title("🔒 Inloggen vereist")
+        st.info("Voer het wachtwoord in om toegang te krijgen tot het SKP Taaksysteem.")
+        st.text_input("Wachtwoord:", type="password",
+                      on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.title("🔒 Inloggen vereist")
+        st.text_input("Wachtwoord:", type="password",
+                      on_change=password_entered, key="password")
+        st.error("Onjuist wachtwoord. Probeer het opnieuw.")
+        return False
+    return True
+
+
+if not check_password():
+    st.stop()
+# ------------------------------
+
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
 
 uploaded_file = st.sidebar.file_uploader(
@@ -25,7 +56,6 @@ LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
 
 
 def ensure_lock_columns(df):
-    """Zorgt dat de aankruisvakjes voor het vastzetten bestaan in het DataFrame."""
     df_res = df.copy()
     for col in LOCK_COLS:
         if col not in df_res.columns:
@@ -561,7 +591,6 @@ if "sheets" in st.session_state:
         sheets[skp_key] = standardize_skp_df(
             sheets[skp_key], div_map=tantalus_div_map)
 
-    # Toon feedbackmelding indien een actie zojuist is uitgevoerd
     if "action_feedback" in st.session_state and st.session_state["action_feedback"]:
         msg_type, msg_text = st.session_state["action_feedback"]
         if msg_type == "success":
@@ -585,7 +614,6 @@ if "sheets" in st.session_state:
     st.subheader(f"Sheet: {selected_tab}")
     display_df = make_arrow_compatible(sheets[selected_tab])
 
-    # Geef kolominformatie mee voor checkboxes
     column_config = {}
     if selected_tab == skp_key:
         for l_col in LOCK_COLS:
@@ -1579,7 +1607,6 @@ if "sheets" in st.session_state:
     for sheet_name, df in sheets.items():
         if sheet_name in wb_download.sheetnames:
             ws = wb_download[sheet_name]
-            # Verwijder tijdelijke lock-kolommen voor het Excel-bestand
             clean_df = df.copy()
             for col_l in LOCK_COLS:
                 if col_l in clean_df.columns:
