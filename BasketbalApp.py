@@ -929,7 +929,7 @@ if "sheets" in st.session_state:
                 target_match_indices = [sel_row_idx]
 
             max_tasks_per_day = st.slider(
-                "Max. taken per speler per dag", 1, 4, 2)
+                "Max. taken per speler per dag", 1, 4, 1)
             start_auto_btn = st.button("🤖 Start indeling voor selectie")
 
         st.divider()
