@@ -190,6 +190,13 @@ def save_persistent_state(sheets_dict):
                         break
 
                 if header_row_idx is not None:
+                    max_clean_row = max(ws.max_row, header_row_idx + len(clean_df) + 10)
+                    for r in range(header_row_idx + 1, max_clean_row + 1):
+                        for c_idx in col_name_to_col_idx.values():
+                            cell = ws.cell(row=r, column=c_idx)
+                            if not isinstance(cell, MergedCell):
+                                cell.value = None
+
                     for df_col in clean_df.columns:
                         col_key = str(df_col).strip().lower()
                         if col_key in col_name_to_col_idx:
@@ -689,6 +696,49 @@ def get_member_actual_team(players_df, target_idx):
             if i == target_idx:
                 return actual if actual else "Overig / Geen Team"
     return "Overig / Geen Team"
+
+
+def insert_player_into_team(players_df, new_row_dict, target_team):
+    """
+    Voegt een nieuwe speler direct in bij het opgegeven team onder de desbetreffende teamkop,
+    in plaats van onderaan het DataFrame te plakken.
+    """
+    df = players_df.copy()
+    col_first = "First name"
+    col_last = "Last name"
+
+    clean_target = clean_team_code(target_team)
+    team_start_idx = None
+
+    for idx, row in df.iterrows():
+        f_val = str(row.get(col_first, "")).strip()
+        l_val = str(row.get(col_last, "")).strip()
+        if l_val in ["nan", "", "none", "None"] and f_val not in ["nan", "", "none", "None"]:
+            if clean_team_code(f_val) == clean_target:
+                team_start_idx = idx
+                break
+
+    if team_start_idx is None:
+        return pd.concat([df, pd.DataFrame([new_row_dict])], ignore_index=True)
+
+    insert_idx = len(df)
+    for idx in range(team_start_idx + 1, len(df)):
+        f_val = str(df.at[idx, col_first]).strip()
+        l_val = str(df.at[idx, col_last]).strip()
+
+        if l_val in ["nan", "", "none", "None"] and f_val not in ["nan", "", "none", "None"]:
+            prev_f = str(df.at[idx - 1, col_first]).strip()
+            prev_l = str(df.at[idx - 1, col_last]).strip()
+            if prev_f in ["", "nan"] and prev_l in ["", "nan"]:
+                insert_idx = idx - 1
+            else:
+                insert_idx = idx
+            break
+
+    df_top = df.iloc[:insert_idx]
+    df_bottom = df.iloc[insert_idx:]
+    df_new = pd.concat([df_top, pd.DataFrame([new_row_dict]), df_bottom], ignore_index=True)
+    return df_new
 
 
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
@@ -1346,13 +1396,13 @@ if "sheets" in st.session_state:
                                 "Table duty": 0,
                                 "Total points": 0.0
                             }
-                            p_df_manage = pd.concat([p_df_manage, pd.DataFrame([new_row])], ignore_index=True)
+                            p_df_manage = insert_player_into_team(p_df_manage, new_row, new_team)
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
                             save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
-                            st.success(f"Lid {new_first} {new_last} toegevoegd! Rooster geüpdatet vanaf 7 dagen.")
+                            st.success(f"Lid {new_first} {new_last} toegevoegd aan {new_team}! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
             # 1.2 TUSSENMENU: LID WIJZIGEN
@@ -1401,9 +1451,19 @@ if "sheets" in st.session_state:
                         btn_update = st.form_submit_button("💾 Wijziging opslaan & Rooster updaten")
 
                         if btn_update:
-                            p_df_manage.at[chosen_idx, "Diploma"] = "" if edit_dip == "Geen" else edit_dip
-                            p_df_manage.at[chosen_idx, "Full/ half season"] = edit_season
-                            p_df_manage.at[chosen_idx, "Team"] = edit_team
+                            target_row_data = p_df_manage.loc[chosen_idx].to_dict()
+                            target_row_data["Diploma"] = "" if edit_dip == "Geen" else edit_dip
+                            target_row_data["Full/ half season"] = edit_season
+                            target_row_data["Team"] = edit_team
+
+                            if clean_team_code(edit_team) != clean_team_code(curr_actual_team):
+                                p_df_manage = p_df_manage.drop(index=chosen_idx).reset_index(drop=True)
+                                p_df_manage = insert_player_into_team(p_df_manage, target_row_data, edit_team)
+                            else:
+                                p_df_manage.at[chosen_idx, "Diploma"] = target_row_data["Diploma"]
+                                p_df_manage.at[chosen_idx, "Full/ half season"] = target_row_data["Full/ half season"]
+                                p_df_manage.at[chosen_idx, "Team"] = target_row_data["Team"]
+
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
                             save_persistent_state(sheets)
@@ -1730,6 +1790,13 @@ if "sheets" in st.session_state:
                     break
 
             if header_row_idx is not None:
+                max_clean_row = max(ws.max_row, header_row_idx + len(clean_df) + 10)
+                for r in range(header_row_idx + 1, max_clean_row + 1):
+                    for c_idx in col_name_to_col_idx.values():
+                        cell = ws.cell(row=r, column=c_idx)
+                        if not isinstance(cell, MergedCell):
+                            cell.value = None
+
                 for df_col in clean_df.columns:
                     col_key = str(df_col).strip().lower()
                     if col_key in col_name_to_col_idx:
