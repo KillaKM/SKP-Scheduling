@@ -190,6 +190,8 @@ def save_persistent_state(sheets_dict):
                         break
 
                 if header_row_idx is not None:
+                    # Als de dataframe meer rijen heeft gekregen dan ws had, breiden we uit
+                    total_needed_rows = header_row_idx + len(clean_df)
                     for df_col in clean_df.columns:
                         col_key = str(df_col).strip().lower()
                         if col_key in col_name_to_col_idx:
@@ -335,7 +337,6 @@ def determine_division_for_team(team_str, div_map):
 
 
 def parse_date_obj(val):
-    """Robuuste datumherkenning die DD-MM-YYYY voorop stelt en Excel Timestamp correct leest."""
     if pd.isna(val) or val is None or str(val).strip() in ["", "nan", "None"]:
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
@@ -400,11 +401,6 @@ def calculate_comm_points(comm_str, comm_points_map):
 
 
 def is_player_eligible_for_date(season_type, date_val):
-    """
-    Controleert of een lid gerechtigd is op basis van de seizoenshelft.
-    1e helft = augustus t/m januari (maand 8, 9, 10, 11, 12, 1).
-    2e helft = februari t/m juli (maand 2, 3, 4, 5, 6, 7).
-    """
     if not season_type:
         return True
 
@@ -415,16 +411,13 @@ def is_player_eligible_for_date(season_type, date_val):
 
     d_obj = parse_date_obj(date_val)
     if not d_obj:
-        # Als datum niet achterhaald kan worden, sluit halve-seizoen spelers veiligheidshalve uit
         return False
 
     is_first_half = d_obj.month in [8, 9, 10, 11, 12, 1]
 
-    # Match 1e helft
     if any(k in st_clean for k in ["1st", "1e", "first", "eerste", "1st half", "first half"]):
         return is_first_half
 
-    # Match 2e helft (inclusief 'second half', '2e helft', etc.)
     if any(k in st_clean for k in ["2nd", "2e", "second", "tweede", "2nd half", "second half"]):
         return not is_first_half
 
@@ -706,6 +699,49 @@ def get_member_actual_team(players_df, target_idx):
             if i == target_idx:
                 return actual if actual else "Overig / Geen Team"
     return "Overig / Geen Team"
+
+
+def insert_player_into_team(players_df, target_team_name, new_row_dict):
+    """
+    Voegt een speler in DIRECT onderaan de sectie van het gekozen team,
+    in plaats van botweg onderaan het hele bestand te plakken.
+    """
+    df = players_df.copy()
+    c_target = clean_team_code(target_team_name)
+
+    insert_idx = None
+    in_target_team = False
+
+    for idx, row in df.iterrows():
+        f_val = str(row.get("First name", "")).strip()
+        l_val = str(row.get("Last name", "")).strip()
+        t_explicit = str(row.get("Team", "")).strip()
+
+        # Is dit een team-header rij?
+        if l_val in ["nan", "", "none", "None"] and f_val:
+            if in_target_team:
+                # We bereiken het volgende team: hier moeten we invoegen!
+                insert_idx = idx
+                break
+            if clean_team_code(f_val) == c_target:
+                in_target_team = True
+        else:
+            # Reguliere spelerrij
+            if in_target_team:
+                insert_idx = idx + 1
+
+    new_row_df = pd.DataFrame([new_row_dict])
+
+    if insert_idx is not None:
+        # Splits het dataframe en voeg de nieuwe rij er tussenin
+        df_top = df.iloc[:insert_idx]
+        df_bottom = df.iloc[insert_idx:]
+        res_df = pd.concat([df_top, new_row_df, df_bottom], ignore_index=True)
+    else:
+        # Als teamkop niet werd gevonden, voeg toe onderaan
+        res_df = pd.concat([df, new_row_df], ignore_index=True)
+
+    return res_df
 
 
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
@@ -1363,13 +1399,14 @@ if "sheets" in st.session_state:
                                 "Table duty": 0,
                                 "Total points": 0.0
                             }
-                            p_df_manage = pd.concat([p_df_manage, pd.DataFrame([new_row])], ignore_index=True)
+                            # Plaats de speler direct onderaan de sectie van het geselecteerde team
+                            p_df_manage = insert_player_into_team(p_df_manage, new_team, new_row)
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
                             save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
-                            st.success(f"Lid {new_first} {new_last} toegevoegd! Rooster geüpdatet vanaf 7 dagen.")
+                            st.success(f"Lid {new_first} {new_last} toegevoegd aan team {new_team}! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
             # 1.2 TUSSENMENU: LID WIJZIGEN
