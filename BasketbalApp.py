@@ -62,7 +62,7 @@ DRIVE_FILENAME = "SKP_Live_Database.xlsx"
 
 
 # =========================================================================
-# GOOGLE DRIVE FUNCTIES (QUOTA-VEILIGE UPDATE)
+# GOOGLE DRIVE FUNCTIES & OPSLAG
 # =========================================================================
 def get_drive_service():
     if "gcp_service_account" not in st.secrets:
@@ -152,6 +152,70 @@ def upload_file_to_gdrive(file_bytes):
         ).execute()
     except Exception as e:
         st.sidebar.warning(f"Live opslaan naar Google Drive mislukt: {e}")
+
+
+def save_persistent_state(sheets_dict):
+    """Schrijft gewijzigde DataFrames terug naar het Excel-bestand en uploadt naar Google Drive."""
+    if "file_bytes" not in st.session_state or not st.session_state["file_bytes"]:
+        return
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(st.session_state["file_bytes"]))
+
+        for sheet_name, df in sheets_dict.items():
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                clean_df = df.copy()
+
+                for col_l in LOCK_COLS:
+                    if col_l in clean_df.columns:
+                        clean_df = clean_df.drop(columns=[col_l])
+
+                header_row_idx = None
+                col_name_to_col_idx = {}
+                for r in range(1, min(15, ws.max_row + 1)):
+                    row_vals = [
+                        str(ws.cell(row=r, column=c).value or "").strip().lower()
+                        for c in range(1, ws.max_column + 1)
+                    ]
+                    if any(
+                        x in row_vals
+                        for x in ["referee 1", "scorer", "first name", "home team", "date"]
+                    ):
+                        header_row_idx = r
+                        for c in range(1, ws.max_column + 1):
+                            val_str = str(ws.cell(row=r, column=c).value or "").strip()
+                            if val_str:
+                                col_name_to_col_idx[val_str.lower()] = c
+                        break
+
+                if header_row_idx is not None:
+                    for df_col in clean_df.columns:
+                        col_key = str(df_col).strip().lower()
+                        if col_key in col_name_to_col_idx:
+                            c_idx = col_name_to_col_idx[col_key]
+                            for row_offset, val in enumerate(clean_df[df_col]):
+                                target_row = header_row_idx + 1 + row_offset
+                                cell = ws.cell(row=target_row, column=c_idx)
+                                if not isinstance(cell, MergedCell):
+                                    cell.value = (
+                                        None
+                                        if (
+                                            pd.isna(val)
+                                            or val == ""
+                                            or str(val).lower() == "nan"
+                                        )
+                                        else val
+                                    )
+
+        output_buf = io.BytesIO()
+        wb.save(output_buf)
+        new_bytes = output_buf.getvalue()
+
+        st.session_state["file_bytes"] = new_bytes
+        upload_file_to_gdrive(new_bytes)
+    except Exception as e:
+        st.sidebar.warning(f"Opslaan van status mislukt: {e}")
 
 
 def ensure_lock_columns(df):
