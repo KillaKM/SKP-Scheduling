@@ -1,8 +1,12 @@
 import copy
 from datetime import datetime, timedelta
 import io
+import json
 import random
 import re
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from google.oauth2 import service_account
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 import pandas as pd
@@ -52,14 +56,85 @@ if not check_password():
 
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload je Excel-bestand", type=["xlsx"], key="main_file_uploader"
-)
-
 LOCK_COLS = ["Lock Ref 1", "Lock Ref 2",
              "Lock Scorer", "Lock Timer", "Lock 24s"]
 TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
+DRIVE_FILENAME = "SKP_Live_Database.xlsx"
+
+
+# =========================================================================
+# GOOGLE DRIVE HELPER FUNCTIES
+# =========================================================================
+def get_drive_service():
+    if "gcp_service_account" not in st.secrets:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        st.error(f"Fout bij verbinden met Google Drive: {e}")
+        return None
+
+
+def get_drive_folder_id():
+    return st.secrets.get("gdrive", {}).get("folder_id", None)
+
+
+def load_file_from_gdrive():
+    service = get_drive_service()
+    folder_id = get_drive_folder_id()
+    if not service or not folder_id:
+        return None
+
+    try:
+        query = f"'{folder_id}' in parents and name = '{DRIVE_FILENAME}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get("files", [])
+        if not files:
+            return None
+
+        file_id = files[0]["id"]
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return fh.getvalue()
+    except Exception as e:
+        st.sidebar.warning(f"Laden van Google Drive mislukt: {e}")
+        return None
+
+
+def upload_file_to_gdrive(file_bytes):
+    service = get_drive_service()
+    folder_id = get_drive_folder_id()
+    if not service or not folder_id:
+        return
+
+    try:
+        query = f"'{folder_id}' in parents and name = '{DRIVE_FILENAME}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get("files", [])
+
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_bytes),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=True,
+        )
+
+        if files:
+            file_id = files[0]["id"]
+            service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            file_metadata = {"name": DRIVE_FILENAME, "parents": [folder_id]}
+            service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    except Exception as e:
+        st.sidebar.warning(f"Live opslaan naar Google Drive mislukt: {e}")
 
 
 def ensure_lock_columns(df):
@@ -546,6 +621,70 @@ def get_member_actual_team(players_df, target_idx):
     return "Overig / Geen Team"
 
 
+def save_persistent_state(sheets_dict):
+    if "file_bytes" not in st.session_state or st.session_state["file_bytes"] is None:
+        return
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(st.session_state["file_bytes"]))
+        for sheet_name, df in sheets_dict.items():
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                clean_df = df.copy()
+
+                for col_l in LOCK_COLS:
+                    if col_l in clean_df.columns:
+                        clean_df = clean_df.drop(columns=[col_l])
+
+                header_row_idx = None
+                col_name_to_col_idx = {}
+                for r in range(1, min(15, ws.max_row + 1)):
+                    row_vals = [
+                        str(ws.cell(row=r, column=c).value or "").strip().lower()
+                        for c in range(1, ws.max_column + 1)
+                    ]
+                    if any(
+                        x in row_vals
+                        for x in ["referee 1", "scorer", "first name", "home team", "date"]
+                    ):
+                        header_row_idx = r
+                        for c in range(1, ws.max_column + 1):
+                            val_str = str(
+                                ws.cell(row=r, column=c).value or "").strip()
+                            if val_str:
+                                col_name_to_col_idx[val_str.lower()] = c
+                        break
+
+                if header_row_idx is not None:
+                    for df_col in clean_df.columns:
+                        col_key = str(df_col).strip().lower()
+                        if col_key in col_name_to_col_idx:
+                            c_idx = col_name_to_col_idx[col_key]
+                            for row_offset, val in enumerate(clean_df[df_col]):
+                                target_row = header_row_idx + 1 + row_offset
+                                cell = ws.cell(row=target_row, column=c_idx)
+                                if not isinstance(cell, MergedCell):
+                                    cell.value = (
+                                        None
+                                        if (
+                                            pd.isna(val)
+                                            or val == ""
+                                            or str(val).lower() == "nan"
+                                        )
+                                        else val
+                                    )
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        updated_bytes = buf.getvalue()
+
+        st.session_state["file_bytes"] = updated_bytes
+        # Schrijf live weg naar Google Drive
+        upload_file_to_gdrive(updated_bytes)
+    except Exception as e:
+        st.warning(f"Live opslaan mislukt: {e}")
+
+
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"]) or "SKP"
     players_key = find_sheet(
@@ -582,7 +721,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
 
     valid_players_dict = {}
     excluded_board_coach = set()
-    excluded_recreational = set()
     for idx, p_row in players_df.iterrows():
         l_val = str(p_row.get("Last name", "")).strip()
         f_val = str(p_row.get("First name", "")).strip()
@@ -598,12 +736,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         is_coach = "coach" in roles_combined and "assistant coach" not in roles_combined
         if is_board or is_coach:
             excluded_board_coach.add(full_name)
-            continue
-
-        # Uitsluiting voor recreatieve spelers op basis van 'Extra'
-        is_recreational = "recreation" in extra_val or "recreant" in extra_val
-        if is_recreational:
-            excluded_recreational.add(full_name)
             continue
 
         d_val = (
@@ -693,7 +825,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 player_day_counts[name][d_val] = player_day_counts[name].get(
                     d_val, 0) + 1
 
-    # SORTEERVOLGORDE: Datum -> Divisie (1, 2 vóór 3, 4, 5) -> Tijd
     def match_sort_key(idx_val):
         d_str = normalize_date_str(skp_df.at[idx_val, "Date"])
         t_str = normalize_time_str(skp_df.at[idx_val, "Time"])
@@ -791,18 +922,18 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 elif div_num == 3:
                     if other_ref_dip in ["BS3", "L3", "L4"]:
                         primary_dips = {"BS2"}
-                        fallback_dips = {"BS2"}
+                        fallback_dips = {"BS2", "BS1"}
                         emergency_dips = {"BS1"}
                     elif other_ref_dip == "BS2":
                         primary_dips = {"BS3", "BS2"}
-                        fallback_dips = {"BS2"}
+                        fallback_dips = {"BS2", "BS1"}
                         emergency_dips = {"BS1"}
                     else:
                         primary_dips = {"BS3", "BS2"}
-                        fallback_dips = {"BS2"}
+                        fallback_dips = {"BS2", "BS1"}
                         emergency_dips = {"BS1"}
                 elif div_num == 4:
-                    primary_dips = {"BS2"}
+                    primary_dips = {"BS2", "BS1"}
                     fallback_dips = {"BS1"}
                     emergency_dips = {"BS1"}
                 else:
@@ -825,15 +956,12 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     if not is_physically_free(p_name):
                         continue
 
-                    # 1. STRIKTE DAGLIMIET
                     day_cnt = player_day_counts[p_name].get(d_norm, 0)
                     if day_cnt >= max_daily_tasks:
                         continue
 
                     curr_pts = p_info["Base_Points"] + (
                         ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
-
-                    # 2. STRIKTE MAXIMUM CAP VAN 16 PUNTEN
                     if (curr_pts + 2.0) > 16.0:
                         continue
 
@@ -843,16 +971,17 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     under_12 = 0 if curr_pts < 12.0 else 1
                     is_overloaded = (curr_pts > (avg_ref_pts + 6.0))
 
-                    if dip in ["L4", "L3"]:
-                        dip_rank = 1
-                    elif dip == "BS3":
-                        dip_rank = 2
-                    elif dip == "BS2":
-                        dip_rank = 3
-                    elif dip == "BS1":
-                        dip_rank = 4
+                    if div_num <= 3:
+                        if dip in ["L4", "L3"]:
+                            dip_rank = 1
+                        elif dip == "BS3":
+                            dip_rank = 2
+                        elif dip == "BS2":
+                            dip_rank = 3
+                        else:
+                            dip_rank = 4
                     else:
-                        dip_rank = 5
+                        dip_rank = 0
 
                     high_div_boost = 0
                     if div_num <= 3 and p_info["Is_BS3_Plus"]:
@@ -885,8 +1014,8 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                         "aurelie_prio": aurelie_priority,
                         "high_div_boost": high_div_boost,
                         "tier": tier,
-                        "dip_rank": dip_rank,
                         "total_points": curr_pts,
+                        "dip_rank": dip_rank,
                         "under_12": under_12,
                         "ref_tasks": ref_tasks_counter[p_name],
                     })
@@ -897,8 +1026,8 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                         x["aurelie_prio"],
                         x["high_div_boost"],
                         x["tier"],
-                        x["dip_rank"],
                         x["total_points"],
+                        x["dip_rank"],
                         x["under_12"],
                         x["ref_tasks"],
                         random.random(),
@@ -944,10 +1073,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                         reasons.append(
                             f"**{exc_name}**: Vrijgesteld van taken (Board / Coach).")
 
-                    for exc_rec in excluded_recreational:
-                        reasons.append(
-                            f"**{exc_rec}**: Vrijgesteld van taken (Recreational).")
-
                     if not reasons:
                         reasons.append(
                             "Geen actieve gediplomeerde arbiters beschikbaar (of allen overschrijden 16 punten).")
@@ -990,7 +1115,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 curr_pts = p_info["Base_Points"] + \
                     (ref_tasks_counter[p_name] * 2) + \
                     (table_tasks_counter[p_name] * 1)
-
                 if (curr_pts + 1.0) > 16.0:
                     continue
 
@@ -1032,6 +1156,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     st.session_state["auto_assigned_cells"] = auto_assigned
     sheets_dict[skp_key] = make_arrow_compatible(skp_df)
     sheets_dict = update_player_stats(sheets_dict)
+    save_persistent_state(sheets_dict)
     return sheets_dict, assignment_warnings
 
 
@@ -1051,58 +1176,79 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
 
     if target_indices:
         current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
-        return run_assignment_core(sheets_dict, target_indices, max_daily_tasks=current_max_tasks, preserve_manual=True)
+        res_sheets, res_warns = run_assignment_core(
+            sheets_dict, target_indices, max_daily_tasks=current_max_tasks, preserve_manual=True)
+        save_persistent_state(res_sheets)
+        return res_sheets, res_warns
     return sheets_dict, []
 
 
 # =========================================================================
-# FILE INLEZEN / VERWERKEN MET DIRECTE RERUN
+# INITIALISATIE: BESTAND LADEN UIT GOOGLE DRIVE OF SESSIE
 # =========================================================================
-if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    curr_filename = getattr(uploaded_file, "name", "excel")
+def parse_and_load_bytes(file_bytes):
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    raw_sheets = {}
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        raw_sheets[sheet] = df.loc[:, ~df.columns.astype(
+            str).str.contains("^Unnamed")]
 
-    need_reload = (
-        "file_bytes" not in st.session_state
-        or st.session_state.get("last_uploaded_filename") != curr_filename
-        or st.sidebar.button("🔄 Bestand opnieuw inlezen")
+    div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
+    div_map = (
+        build_division_map(raw_sheets[div_sheet_name])
+        if div_sheet_name
+        else {}
     )
 
-    if need_reload:
-        st.session_state["file_bytes"] = file_bytes
-        st.session_state["last_uploaded_filename"] = curr_filename
+    orig_sheets = {}
+    for sheet, df in raw_sheets.items():
+        if "player" in sheet.lower():
+            df = standardize_players_df(df)
+        elif "skp" in sheet.lower() and "player" not in sheet.lower():
+            df = standardize_skp_df(df, div_map=div_map)
+            for col in TASK_COLS:
+                if col in df.columns:
+                    df[col] = df[col].fillna("").astype(
+                        str).replace({"nan": "", "None": ""})
+        orig_sheets[sheet] = df
+    return orig_sheets
 
-        xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        raw_sheets = {}
-        for sheet in xls.sheet_names:
-            df = xls.parse(sheet)
-            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(
-                str).str.contains("^Unnamed")]
 
-        div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
-        div_map = (
-            build_division_map(raw_sheets[div_sheet_name])
-            if div_sheet_name
-            else {}
-        )
-
-        orig_sheets = {}
-        for sheet, df in raw_sheets.items():
-            if "player" in sheet.lower():
-                df = standardize_players_df(df)
-            elif "skp" in sheet.lower() and "player" not in sheet.lower():
-                df = standardize_skp_df(df, div_map=div_map)
-                for col in TASK_COLS:
-                    if col in df.columns:
-                        df[col] = df[col].fillna("").astype(
-                            str).replace({"nan": "", "None": ""})
-            orig_sheets[sheet] = df
-
-        st.session_state["original_sheets"] = copy.deepcopy(orig_sheets)
-        st.session_state["sheets"] = copy.deepcopy(orig_sheets)
+# Check bij app-start of er al een database op Google Drive staat
+if "sheets" not in st.session_state:
+    drive_bytes = load_file_from_gdrive()
+    if drive_bytes:
+        st.session_state["file_bytes"] = drive_bytes
+        loaded_sheets = parse_and_load_bytes(drive_bytes)
+        st.session_state["original_sheets"] = copy.deepcopy(loaded_sheets)
+        st.session_state["sheets"] = copy.deepcopy(loaded_sheets)
         st.session_state["indeling_gedaan"] = False
         st.session_state["assignment_warnings"] = []
         st.session_state["auto_assigned_cells"] = set()
+        st.sidebar.success("☁️ Live-rooster geladen vanuit Google Drive!")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload handmatig Excel (optioneel)", type=["xlsx"], key="main_file_uploader"
+)
+
+# Handmatige upload overschrijft Google Drive bestand
+if uploaded_file is not None:
+    f_bytes = uploaded_file.getvalue()
+    curr_fn = getattr(uploaded_file, "name", "excel")
+
+    if st.session_state.get("last_uploaded_filename") != curr_fn:
+        st.session_state["file_bytes"] = f_bytes
+        st.session_state["last_uploaded_filename"] = curr_fn
+
+        new_sheets = parse_and_load_bytes(f_bytes)
+        st.session_state["original_sheets"] = copy.deepcopy(new_sheets)
+        st.session_state["sheets"] = copy.deepcopy(new_sheets)
+        st.session_state["indeling_gedaan"] = False
+        st.session_state["assignment_warnings"] = []
+        st.session_state["auto_assigned_cells"] = set()
+
+        upload_file_to_gdrive(f_bytes)
         st.rerun()
 
 
@@ -1127,8 +1273,10 @@ if "sheets" in st.session_state:
         sheets[skp_key] = standardize_skp_df(
             sheets[skp_key], div_map=tantalus_div_map)
 
+    st.caption("☁️ **Google Drive Gekoppeld**: Alle aanpassingen en indelingen worden realtime gesynchroniseerd met Google Drive.")
+
     tab_names = list(sheets.keys())
-    col_sel_sheet, _ = st.columns([1, 2])
+    col_sel_sheet, _ = st.columns([2, 1])
     with col_sel_sheet:
         selected_tab = st.selectbox(
             "📋 Kies een Sheet om te bekijken/bewerken:",
@@ -1159,6 +1307,7 @@ if "sheets" in st.session_state:
     if not edited_df.equals(sheets[selected_tab]):
         sheets[selected_tab] = edited_df
         sheets = update_player_stats(sheets)
+        save_persistent_state(sheets)
         st.rerun()
 
     # --- MELDINGENVENSTER EN VERGELIJKEN ORIGINEEL VS GEÜPDATET (IN TABBLADEN) ---
@@ -1234,13 +1383,14 @@ if "sheets" in st.session_state:
                                 "Extra points": 0.0,
                                 "Referee": 0,
                                 "Table duty": 0,
-                                "Total points": 0.0,
+                                "Total points": 0.0
                             }
                             p_df_manage = pd.concat(
                                 [p_df_manage, pd.DataFrame([new_row])], ignore_index=True)
                             sheets[players_key] = standardize_players_df(
                                 p_df_manage)
                             sheets = update_player_stats(sheets)
+                            save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(
                                 sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
@@ -1312,6 +1462,7 @@ if "sheets" in st.session_state:
                             sheets[players_key] = standardize_players_df(
                                 p_df_manage)
                             sheets = update_player_stats(sheets)
+                            save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(
                                 sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
@@ -1368,6 +1519,7 @@ if "sheets" in st.session_state:
                         sheets[players_key] = standardize_players_df(
                             p_df_manage)
                         sheets = update_player_stats(sheets)
+                        save_persistent_state(sheets)
                         sheets, warns = auto_reassign_future_schedule(
                             sheets, days_ahead=0)
                         st.session_state["assignment_warnings"] = warns
@@ -1420,6 +1572,7 @@ if "sheets" in st.session_state:
             if st.button("💾 Sla Commissies op & Synchroniseer", key="btn_save_comm_menu"):
                 sheets[players_key] = players_df
                 sheets = update_player_stats(sheets)
+                save_persistent_state(sheets)
                 st.session_state["action_feedback"] = (
                     "success",
                     "Commissies succesvol bijgewerkt!",
@@ -1453,7 +1606,7 @@ if "sheets" in st.session_state:
 
                     st.checkbox(
                         "Selecteer Alle Dagen",
-                        value=False,
+                        value=True,
                         key="select_all_assign_days",
                         on_change=toggle_all_days_sync
                     )
@@ -1515,6 +1668,7 @@ if "sheets" in st.session_state:
             sheets, target_match_indices, max_daily_tasks=max_daily_tasks, preserve_manual=False)
         st.session_state["indeling_gedaan"] = True
         st.session_state["assignment_warnings"] = warns
+        save_persistent_state(sheets)
         if warns:
             st.warning(
                 "Indeling voltooid, maar er zijn openstaande posities. Bekijk het overzicht hierboven.")
@@ -1551,6 +1705,7 @@ if "sheets" in st.session_state:
                     sheets = update_player_stats(sheets)
                     st.session_state["assignment_warnings"] = []
                     st.session_state["auto_assigned_cells"] = set()
+                    save_persistent_state(sheets)
                     st.rerun()
 
             elif clear_mode == "Indeling wissen per dag":
@@ -1578,6 +1733,7 @@ if "sheets" in st.session_state:
                         sheets[skp_key] = make_arrow_compatible(skp_df_clear)
                         sheets = update_player_stats(sheets)
                         st.session_state["assignment_warnings"] = []
+                        save_persistent_state(sheets)
                         st.rerun()
 
             else:
@@ -1610,6 +1766,7 @@ if "sheets" in st.session_state:
                         sheets[skp_key] = make_arrow_compatible(skp_df_clear)
                         sheets = update_player_stats(sheets)
                         st.session_state["assignment_warnings"] = []
+                        save_persistent_state(sheets)
                         st.rerun()
 
     # --- 5. MENU: OPSLAAN & DOWNLOADEN ---
@@ -1679,4 +1836,4 @@ if "sheets" in st.session_state:
     )
 
 else:
-    st.info("👈 Upload je Excel-bestand in het linker menu om te beginnen.")
+    st.info("👈 Upload eenmalig je Excel-bestand in het linker menu om te beginnen, of configureer Google Drive.")
