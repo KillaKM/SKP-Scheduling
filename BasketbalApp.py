@@ -62,7 +62,7 @@ DRIVE_FILENAME = "SKP_Live_Database.xlsx"
 
 
 # =========================================================================
-# GOOGLE DRIVE FUNCTIES (MET ONDERSTEUNING VOOR ALLE DRIVE TYPES)
+# GOOGLE DRIVE FUNCTIES (QUOTA-VEILIGE UPDATE)
 # =========================================================================
 def get_drive_service():
     if "gcp_service_account" not in st.secrets:
@@ -132,30 +132,24 @@ def upload_file_to_gdrive(file_bytes):
         ).execute()
         files = results.get("files", [])
 
+        if not files:
+            st.sidebar.error(
+                f"⚠️ '{DRIVE_FILENAME}' niet gevonden in de Drive map! Upload eenmalig handmatig je Excel-bestand als '{DRIVE_FILENAME}' in die map."
+            )
+            return
+
+        file_id = files[0]["id"]
         media = MediaIoBaseUpload(
             io.BytesIO(file_bytes),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=True
         )
 
-        if files:
-            file_id = files[0]["id"]
-            service.files().update(
-                fileId=file_id,
-                media_body=media,
-                supportsAllDrives=True
-            ).execute()
-        else:
-            file_metadata = {
-                "name": DRIVE_FILENAME,
-                "parents": [folder_id]
-            }
-            service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True
-            ).execute()
+        service.files().update(
+            fileId=file_id,
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
     except Exception as e:
         st.sidebar.warning(f"Live opslaan naar Google Drive mislukt: {e}")
 
@@ -633,68 +627,6 @@ def get_member_actual_team(players_df, target_idx):
     return "Overig / Geen Team"
 
 
-def save_persistent_state(sheets_dict):
-    if "file_bytes" not in st.session_state or st.session_state["file_bytes"] is None:
-        return
-
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(st.session_state["file_bytes"]))
-        for sheet_name, df in sheets_dict.items():
-            if sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                clean_df = df.copy()
-
-                for col_l in LOCK_COLS:
-                    if col_l in clean_df.columns:
-                        clean_df = clean_df.drop(columns=[col_l])
-
-                header_row_idx = None
-                col_name_to_col_idx = {}
-                for r in range(1, min(15, ws.max_row + 1)):
-                    row_vals = [
-                        str(ws.cell(row=r, column=c).value or "").strip().lower()
-                        for c in range(1, ws.max_column + 1)
-                    ]
-                    if any(
-                        x in row_vals
-                        for x in ["referee 1", "scorer", "first name", "home team", "date"]
-                    ):
-                        header_row_idx = r
-                        for c in range(1, ws.max_column + 1):
-                            val_str = str(ws.cell(row=r, column=c).value or "").strip()
-                            if val_str:
-                                col_name_to_col_idx[val_str.lower()] = c
-                        break
-
-                if header_row_idx is not None:
-                    for df_col in clean_df.columns:
-                        col_key = str(df_col).strip().lower()
-                        if col_key in col_name_to_col_idx:
-                            c_idx = col_name_to_col_idx[col_key]
-                            for row_offset, val in enumerate(clean_df[df_col]):
-                                target_row = header_row_idx + 1 + row_offset
-                                cell = ws.cell(row=target_row, column=c_idx)
-                                if not isinstance(cell, MergedCell):
-                                    cell.value = (
-                                        None
-                                        if (
-                                            pd.isna(val)
-                                            or val == ""
-                                            or str(val).lower() == "nan"
-                                        )
-                                        else val
-                                    )
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        updated_bytes = buf.getvalue()
-
-        st.session_state["file_bytes"] = updated_bytes
-        upload_file_to_gdrive(updated_bytes)
-    except Exception as e:
-        st.warning(f"Live opslaan mislukt: {e}")
-
-
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"]) or "SKP"
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"]) or "Players"
@@ -825,7 +757,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 player_busy_times[name].add((d_val, t_val))
                 player_day_counts[name][d_val] = player_day_counts[name].get(d_val, 0) + 1
 
-    # Sortering: Datum -> Divisie (1, 2 vóór 3, 4, 5) -> Tijd
     def match_sort_key(idx_val):
         d_str = normalize_date_str(skp_df.at[idx_val, "Date"])
         t_str = normalize_time_str(skp_df.at[idx_val, "Time"])
@@ -1765,4 +1696,4 @@ if "sheets" in st.session_state:
     )
 
 else:
-    st.info("👈 Upload eenmalig je Excel-bestand in het linker menu om te beginnen, of zorg dat de Google Drive koppeling actief is.")
+    st.info("👈 Upload eenmalig je Excel-bestand in het linker menu om te beginnen, of zorg dat 'SKP_Live_Database.xlsx' in je Google Drive map staat.")
