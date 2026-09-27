@@ -13,8 +13,6 @@ st.set_page_config(
 )
 
 # --- WACHTWOORDBEVEILIGING ---
-
-
 def check_password():
     def password_entered():
         if st.session_state["password"] == "Tantalus2627!":
@@ -56,8 +54,7 @@ uploaded_file = st.sidebar.file_uploader(
     "Upload je Excel-bestand", type=["xlsx"], key="main_file_uploader"
 )
 
-LOCK_COLS = ["Lock Ref 1", "Lock Ref 2",
-             "Lock Scorer", "Lock Timer", "Lock 24s"]
+LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
 TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
 
@@ -183,16 +180,19 @@ def parse_date_obj(val):
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.date()
+
+    try:
+        dt = pd.to_datetime(val, dayfirst=True)
+        return dt.date()
+    except Exception:
+        pass
+
     s = str(val).strip()
     m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})", s)
     if m:
-        p1, p2, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        d, m_val, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if y < 100:
             y += 2000
-        if p1 > 12:
-            d, m_val = p1, p2
-        else:
-            d, m_val = p2, p1
         try:
             return datetime(y, m_val, d).date()
         except ValueError:
@@ -239,23 +239,42 @@ def calculate_comm_points(comm_str, comm_points_map):
     return sum(comm_points_map.get(c, 0.0) for c in comms)
 
 
+def is_player_eligible_for_date(season_type, date_val):
+    if not season_type:
+        return True
+
+    st_clean = str(season_type).strip().lower()
+
+    if any(k in st_clean for k in ["full", "heel", "vol", "beide", "all"]):
+        return True
+
+    d_obj = parse_date_obj(date_val)
+    if not d_obj:
+        return False
+
+    is_first_half = d_obj.month in [8, 9, 10, 11, 12, 1]
+
+    if any(k in st_clean for k in ["1st", "1e", "first", "eerste", "1st half", "first half"]):
+        return is_first_half
+
+    if any(k in st_clean for k in ["2nd", "2e", "second", "tweede", "2nd half", "second half"]):
+        return not is_first_half
+
+    return True
+
+
 def standardize_players_df(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    col_last = find_col(df, ["last name", "lastname", "achternaam",
-                        "last"], fallback_index=1 if len(df.columns) > 1 else None)
-    col_first = find_col(df, ["first name", "firstname", "voornaam",
-                         "first"], fallback_index=0 if len(df.columns) > 0 else None)
-    col_dip = find_col(df, ["diploma", "licentie", "certificaat",
-                       "niveau"], fallback_index=2 if len(df.columns) > 2 else None)
+    col_last = find_col(df, ["last name", "lastname", "achternaam", "last"], fallback_index=1 if len(df.columns) > 1 else None)
+    col_first = find_col(df, ["first name", "firstname", "voornaam", "first"], fallback_index=0 if len(df.columns) > 0 else None)
+    col_dip = find_col(df, ["diploma", "licentie", "certificaat", "niveau"], fallback_index=2 if len(df.columns) > 2 else None)
     col_comm = find_col(df, ["committee", "commissie"])
     col_extra = find_col(df, ["extra", "opmerking", "status", "notes"])
     col_team = find_col(df, ["team", "teamnaam", "spelend team"])
-    col_season = find_col(
-        df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "half"])
-    col_extra_pts = find_col(
-        df, ["extra points", "extra punten", "commissie punten", "comm points"])
+    col_season = find_col(df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "seizoenshelft", "half"])
+    col_extra_pts = find_col(df, ["extra points", "extra punten", "commissie punten", "comm points"])
     col_total_pts = find_col(df, ["total points", "totaal punten", "punten"])
 
     renames = {}
@@ -299,8 +318,7 @@ def standardize_players_df(df):
     if "Extra points" not in df.columns:
         df["Extra points"] = 0.0
     else:
-        df["Extra points"] = pd.to_numeric(
-            df["Extra points"], errors="coerce").fillna(0.0)
+        df["Extra points"] = pd.to_numeric(df["Extra points"], errors="coerce").fillna(0.0)
 
     if "Referee" not in df.columns:
         df["Referee"] = 0
@@ -309,8 +327,7 @@ def standardize_players_df(df):
     if "Total points" not in df.columns:
         df["Total points"] = df["Extra points"]
     else:
-        df["Total points"] = pd.to_numeric(
-            df["Total points"], errors="coerce").fillna(df["Extra points"])
+        df["Total points"] = pd.to_numeric(df["Total points"], errors="coerce").fillna(df["Extra points"])
 
     return df
 
@@ -323,8 +340,7 @@ def standardize_skp_df(df, div_map=None):
     col_away = find_col(df, ["away team", "uit team", "away", "uit"])
     col_date = find_col(df, ["date", "datum"])
     col_time = find_col(df, ["time", "tijd"])
-    col_div = find_col(
-        df, ["division", "divisie", "poule", "klasse", "league", "div"])
+    col_div = find_col(df, ["division", "divisie", "poule", "klasse", "league", "div"])
 
     renames = {}
     if col_home and col_home != "Home Team":
@@ -404,25 +420,6 @@ def is_player_playing(player_team, date_val, time_val, curr_home, curr_away, bus
     return False
 
 
-def is_player_eligible_for_date(season_type, date_val):
-    if not season_type:
-        return True
-    st_clean = str(season_type).strip().lower()
-    if "full" in st_clean or "heel" in st_clean:
-        return True
-
-    d_obj = parse_date_obj(date_val)
-    if not d_obj:
-        return True
-
-    is_first_half = d_obj.month in [8, 9, 10, 11, 12, 1]
-    if "first" in st_clean or "1st" in st_clean or "1e" in st_clean:
-        return is_first_half
-    elif "second" in st_clean or "2nd" in st_clean or "2e" in st_clean:
-        return not is_first_half
-    return True
-
-
 def update_player_stats(sheets_dict):
     p_k = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
     s_k = find_sheet(sheets_dict, ["SKP", "Rooster"])
@@ -438,8 +435,7 @@ def update_player_stats(sheets_dict):
     comm_points_map = {}
     if not committees_df.empty:
         col_c = committees_df.columns[0]
-        col_p = committees_df.columns[-1] if len(
-            committees_df.columns) > 1 else None
+        col_p = committees_df.columns[-1] if len(committees_df.columns) > 1 else None
         for _, row in committees_df.dropna(subset=[col_c]).iterrows():
             c_name = str(row[col_c]).strip()
             try:
@@ -505,8 +501,7 @@ def get_team_player_groups(players_df):
                 if current_team not in team_groups:
                     team_groups[current_team] = []
         else:
-            actual_team = t_explicit if (t_explicit and t_explicit not in [
-                                         "nan", "", "none", "None"]) else current_team
+            actual_team = t_explicit if (t_explicit and t_explicit not in ["nan", "", "none", "None"]) else current_team
             if actual_team not in team_groups:
                 team_groups[actual_team] = []
             team_groups[actual_team].append(idx)
@@ -539,19 +534,53 @@ def get_member_actual_team(players_df, target_idx):
             if f and f.lower() not in ["nan", "none"]:
                 current_team = f
         else:
-            actual = t if (t and t.lower() not in [
-                           "nan", "none", ""]) else current_team
+            actual = t if (t and t.lower() not in ["nan", "none", ""]) else current_team
             if i == target_idx:
                 return actual if actual else "Overig / Geen Team"
     return "Overig / Geen Team"
 
 
+def insert_player_into_team(players_df, target_team_name, new_row_dict):
+    """
+    Voegt een nieuw lid direct onderaan de sectie van het specifieke team in,
+    in plaats van onderaan het hele document.
+    """
+    df = players_df.copy()
+    c_target = clean_team_code(target_team_name)
+
+    insert_idx = None
+    in_target_team = False
+
+    for idx, row in df.iterrows():
+        f_val = str(row.get("First name", "")).strip()
+        l_val = str(row.get("Last name", "")).strip()
+
+        if l_val in ["nan", "", "none", "None"] and f_val:
+            if in_target_team:
+                insert_idx = idx
+                break
+            if clean_team_code(f_val) == c_target:
+                in_target_team = True
+        else:
+            if in_target_team:
+                insert_idx = idx + 1
+
+    new_row_df = pd.DataFrame([new_row_dict])
+
+    if insert_idx is not None:
+        df_top = df.iloc[:insert_idx]
+        df_bottom = df.iloc[insert_idx:]
+        res_df = pd.concat([df_top, new_row_df, df_bottom], ignore_index=True)
+    else:
+        res_df = pd.concat([df, new_row_df], ignore_index=True)
+
+    return res_df
+
+
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"]) or "SKP"
-    players_key = find_sheet(
-        sheets_dict, ["Players skp", "Players", "Spelers"]) or "Players"
-    all_games_key = find_sheet(
-        sheets_dict, ["All games", "all games", "ALL GAMES"]) or "all games"
+    players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"]) or "Players"
+    all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"]) or "all games"
     div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"]) or "Divisions"
 
     divisions_df = sheets_dict.get(div_key, pd.DataFrame())
@@ -562,8 +591,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     if not all_games_df.empty:
         all_games_df = standardize_skp_df(all_games_df)
 
-    players_df = standardize_players_df(
-        sheets_dict.get(players_key, pd.DataFrame()))
+    players_df = standardize_players_df(sheets_dict.get(players_key, pd.DataFrame()))
 
     player_team_map = {}
     current_team = ""
@@ -577,8 +605,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 current_team = f_val
         else:
             full_n = f"{f_val} {l_val}".strip()
-            player_team_map[full_n] = t_explicit if (t_explicit and t_explicit not in [
-                                                     "nan", "", "none", "None"]) else current_team
+            player_team_map[full_n] = t_explicit if (t_explicit and t_explicit not in ["nan", "", "none", "None"]) else current_team
 
     valid_players_dict = {}
     excluded_board_coach = set()
@@ -600,7 +627,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
             excluded_board_coach.add(full_name)
             continue
 
-        # Uitsluiting voor recreatieve spelers op basis van 'Extra'
         is_recreational = "recreation" in extra_val or "recreant" in extra_val
         if is_recreational:
             excluded_recreational.add(full_name)
@@ -628,8 +654,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
 
         team = player_team_map.get(full_name, "")
         init_extra_pts = float(p_row.get("Extra points", 0.0))
-        season_type = str(
-            p_row.get("Full/ half season", "Full season")).strip()
+        season_type = str(p_row.get("Full/ half season", "Full season")).strip()
 
         valid_players_dict[full_name] = {
             "First name": f_val,
@@ -649,11 +674,9 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     for idx in target_match_indices:
         for col_c in TASK_COLS:
             l_col = LOCK_MAP[col_c]
-            is_locked = bool(skp_df.at[idx, l_col]
-                             ) if l_col in skp_df.columns else False
+            is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
             curr_v = str(skp_df.at[idx, col_c]).strip()
-            is_manual_entry = (preserve_manual and curr_v not in [
-                               "", "nan", "None", "x"] and (idx, col_c) not in auto_assigned)
+            is_manual_entry = (preserve_manual and curr_v not in ["", "nan", "None", "x"] and (idx, col_c) not in auto_assigned)
 
             if is_manual_entry:
                 skp_df.at[idx, l_col] = True
@@ -681,19 +704,15 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
             if name in valid_players_dict:
                 ref_tasks_counter[name] += 1
                 player_busy_times[name].add((d_val, t_val))
-                player_day_counts[name][d_val] = player_day_counts[name].get(
-                    d_val, 0) + 1
+                player_day_counts[name][d_val] = player_day_counts[name].get(d_val, 0) + 1
         for col in ["Scorer", "Timer", "24 sec operator"]:
             name = str(skp_df.at[idx_row, col]).strip()
             if name in valid_players_dict:
                 table_tasks_counter[name] += 1
-                duty_specific_counter[name][col] = duty_specific_counter[name].get(
-                    col, 0) + 1
+                duty_specific_counter[name][col] = duty_specific_counter[name].get(col, 0) + 1
                 player_busy_times[name].add((d_val, t_val))
-                player_day_counts[name][d_val] = player_day_counts[name].get(
-                    d_val, 0) + 1
+                player_day_counts[name][d_val] = player_day_counts[name].get(d_val, 0) + 1
 
-    # SORTEERVOLGORDE: Datum -> Divisie (1, 2 vóór 3, 4, 5) -> Tijd
     def match_sort_key(idx_val):
         d_str = normalize_date_str(skp_df.at[idx_val, "Date"])
         t_str = normalize_time_str(skp_df.at[idx_val, "Time"])
@@ -741,15 +760,13 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         if is_tantalus_mse1:
             for ref_col in ["Referee 1", "Referee 2"]:
                 l_col = LOCK_MAP[ref_col]
-                is_locked = bool(
-                    skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+                is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
                 if not is_locked:
                     skp_df.at[idx, ref_col] = "x"
         else:
             for ref_col in ["Referee 1", "Referee 2"]:
                 l_col = LOCK_MAP[ref_col]
-                is_locked = bool(
-                    skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+                is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
                 if is_locked:
                     continue
 
@@ -759,8 +776,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
 
                 other_ref_col = "Referee 2" if ref_col == "Referee 1" else "Referee 1"
                 other_ref = str(skp_df.at[idx, other_ref_col]).strip()
-                other_ref_dip = valid_players_dict.get(
-                    other_ref, {}).get("Diploma", "")
+                other_ref_dip = valid_players_dict.get(other_ref, {}).get("Diploma", "")
                 has_aurelie_assigned = ("aurelie" in other_ref.lower())
 
                 primary_dips = set()
@@ -810,12 +826,10 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     fallback_dips = {"BS1", "BS2"}
 
                 all_ref_pts = [
-                    p["Base_Points"] + (ref_tasks_counter[n]
-                                        * 2) + (table_tasks_counter[n] * 1)
+                    p["Base_Points"] + (ref_tasks_counter[n] * 2) + (table_tasks_counter[n] * 1)
                     for n, p in valid_players_dict.items() if p["Has_Diploma"]
                 ]
-                avg_ref_pts = sum(all_ref_pts) / \
-                    len(all_ref_pts) if all_ref_pts else 0.0
+                avg_ref_pts = sum(all_ref_pts) / len(all_ref_pts) if all_ref_pts else 0.0
 
                 ref_cands = []
                 for p_name, p_info in valid_players_dict.items():
@@ -825,15 +839,11 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     if not is_physically_free(p_name):
                         continue
 
-                    # 1. STRIKTE DAGLIMIET
                     day_cnt = player_day_counts[p_name].get(d_norm, 0)
                     if day_cnt >= max_daily_tasks:
                         continue
 
-                    curr_pts = p_info["Base_Points"] + (
-                        ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
-
-                    # 2. STRIKTE MAXIMUM CAP VAN 16 PUNTEN
+                    curr_pts = p_info["Base_Points"] + (ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
                     if (curr_pts + 2.0) > 16.0:
                         continue
 
@@ -910,8 +920,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     skp_df.at[idx, ref_col] = chosen
                     assigned_in_match.add(chosen)
                     player_busy_times[chosen].add((d_norm, t_norm))
-                    player_day_counts[chosen][d_norm] = player_day_counts[chosen].get(
-                        d_norm, 0) + 1
+                    player_day_counts[chosen][d_norm] = player_day_counts[chosen].get(d_norm, 0) + 1
                     ref_tasks_counter[chosen] += 1
                     auto_assigned.add((idx, ref_col))
                 else:
@@ -921,36 +930,27 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                             continue
                         p_team = p_info["Team"]
                         p_day_cnt = player_day_counts[p_name].get(d_norm, 0)
-                        p_pts = p_info["Base_Points"] + (ref_tasks_counter[p_name] * 2) + (
-                            table_tasks_counter[p_name] * 1)
+                        p_pts = p_info["Base_Points"] + (ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
 
                         if (p_pts + 2.0) > 16.0:
-                            reasons.append(
-                                f"**{p_name}** ({p_info['Diploma']}): Bereikt maximum van 16 punten ({p_pts} pnt).")
+                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): Bereikt maximum van 16 punten ({p_pts} pnt).")
                         elif (d_norm, t_norm) in player_busy_times[p_name]:
-                            reasons.append(
-                                f"**{p_name}** ({p_info['Diploma']}): Heeft al een taak om {t_norm}.")
+                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): Heeft al een taak om {t_norm}.")
                         elif is_player_playing(p_team, m_date, m_time, home_team, away_team, busy_game_slots):
-                            reasons.append(
-                                f"**{p_name}** ({p_info['Diploma']}): Speelt zelf met team *{p_team}*.")
+                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): Speelt zelf met team *{p_team}*.")
                         elif p_day_cnt >= max_daily_tasks:
-                            reasons.append(
-                                f"**{p_name}** ({p_info['Diploma']}): Daglimiet van {max_daily_tasks} ta(a)k(en) bereikt.")
+                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): Daglimiet van {max_daily_tasks} ta(a)k(en) bereikt.")
                         elif not is_player_eligible_for_date(p_info["Season_Type"], m_date):
-                            reasons.append(
-                                f"**{p_name}**: Speelt halve seizoen ({p_info['Season_Type']}).")
+                            reasons.append(f"**{p_name}**: Speelt halve seizoen ({p_info['Season_Type']}).")
 
                     for exc_name in excluded_board_coach:
-                        reasons.append(
-                            f"**{exc_name}**: Vrijgesteld van taken (Board / Coach).")
+                        reasons.append(f"**{exc_name}**: Vrijgesteld van taken (Board / Coach).")
 
                     for exc_rec in excluded_recreational:
-                        reasons.append(
-                            f"**{exc_rec}**: Vrijgesteld van taken (Recreational).")
+                        reasons.append(f"**{exc_rec}**: Vrijgesteld van taken (Recreational).")
 
                     if not reasons:
-                        reasons.append(
-                            "Geen actieve gediplomeerde arbiters beschikbaar (of allen overschrijden 16 punten).")
+                        reasons.append("Geen actieve gediplomeerde arbiters beschikbaar (of allen overschrijden 16 punten).")
 
                     assignment_warnings.append({
                         "match": f"{home_team} vs {away_team}",
@@ -967,8 +967,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
 
         for col in table_tasks_needed:
             l_col = LOCK_MAP[col]
-            is_locked = bool(skp_df.at[idx, l_col]
-                             ) if l_col in skp_df.columns else False
+            is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
             if is_locked:
                 continue
 
@@ -987,9 +986,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 if day_cnt >= max_daily_tasks:
                     continue
 
-                curr_pts = p_info["Base_Points"] + \
-                    (ref_tasks_counter[p_name] * 2) + \
-                    (table_tasks_counter[p_name] * 1)
+                curr_pts = p_info["Base_Points"] + (ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
 
                 if (curr_pts + 1.0) > 16.0:
                     continue
@@ -1022,11 +1019,9 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 skp_df.at[idx, col] = chosen
                 assigned_in_match.add(chosen)
                 player_busy_times[chosen].add((d_norm, t_norm))
-                player_day_counts[chosen][d_norm] = player_day_counts[chosen].get(
-                    d_norm, 0) + 1
+                player_day_counts[chosen][d_norm] = player_day_counts[chosen].get(d_norm, 0) + 1
                 table_tasks_counter[chosen] += 1
-                duty_specific_counter[chosen][col] = duty_specific_counter[chosen].get(
-                    col, 0) + 1
+                duty_specific_counter[chosen][col] = duty_specific_counter[chosen].get(col, 0) + 1
                 auto_assigned.add((idx, col))
 
     st.session_state["auto_assigned_cells"] = auto_assigned
@@ -1076,8 +1071,7 @@ if uploaded_file is not None:
         raw_sheets = {}
         for sheet in xls.sheet_names:
             df = xls.parse(sheet)
-            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(
-                str).str.contains("^Unnamed")]
+            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
 
         div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
         div_map = (
@@ -1094,8 +1088,7 @@ if uploaded_file is not None:
                 df = standardize_skp_df(df, div_map=div_map)
                 for col in TASK_COLS:
                     if col in df.columns:
-                        df[col] = df[col].fillna("").astype(
-                            str).replace({"nan": "", "None": ""})
+                        df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
             orig_sheets[sheet] = df
 
         st.session_state["original_sheets"] = copy.deepcopy(orig_sheets)
@@ -1112,20 +1105,17 @@ if uploaded_file is not None:
 if "sheets" in st.session_state:
     sheets = st.session_state["sheets"]
 
-    players_key = find_sheet(
-        sheets, ["Players skp", "Players", "Spelers"]) or "Players"
+    players_key = find_sheet(sheets, ["Players skp", "Players", "Spelers"]) or "Players"
     skp_key = find_sheet(sheets, ["SKP", "Rooster"]) or "SKP"
     comm_key = find_sheet(sheets, ["Committees", "Commissies"]) or "Committees"
-    all_games_key = find_sheet(
-        sheets, ["All games", "all games", "ALL GAMES"]) or "all games"
+    all_games_key = find_sheet(sheets, ["All games", "all games", "ALL GAMES"]) or "all games"
     div_key = find_sheet(sheets, ["Divisions", "Divisies"]) or "Divisions"
 
     divisions_df = sheets.get(div_key, pd.DataFrame())
     tantalus_div_map = build_division_map(divisions_df)
 
     if skp_key in sheets:
-        sheets[skp_key] = standardize_skp_df(
-            sheets[skp_key], div_map=tantalus_div_map)
+        sheets[skp_key] = standardize_skp_df(sheets[skp_key], div_map=tantalus_div_map)
 
     tab_names = list(sheets.keys())
     col_sel_sheet, _ = st.columns([1, 2])
@@ -1165,30 +1155,25 @@ if "sheets" in st.session_state:
     st.divider()
     if st.session_state.get("assignment_warnings"):
         with st.expander("⚠️ Meldingenoverzicht: Waarom scheidsrechterplekken openstaan", expanded=True):
-            st.error(
-                "Niet alle scheidsrechterposities konden automatisch worden ingedeeld. Hieronder staan de gedetailleerde redenen:")
+            st.error("Niet alle scheidsrechterposities konden automatisch worden ingedeeld. Hieronder staan de gedetailleerde redenen:")
             for w in st.session_state["assignment_warnings"]:
                 st.markdown(f"**🏀 {w['match']}** - *{w['slot']}*:")
                 for r_line in w["reasons"]:
                     st.write(f"- {r_line}")
 
     st.subheader("🔍 Rooster Vergelijking: Origineel vs Geüpdatet")
-    tab_orig, tab_updated = st.tabs(
-        ["📄 Origineel Rooster", "✨ Geüpdatet Rooster"])
+    tab_orig, tab_updated = st.tabs(["📄 Origineel Rooster", "✨ Geüpdatet Rooster"])
 
     with tab_orig:
-        orig_skp = st.session_state.get(
-            "original_sheets", {}).get(skp_key, pd.DataFrame())
+        orig_skp = st.session_state.get("original_sheets", {}).get(skp_key, pd.DataFrame())
         if not orig_skp.empty:
-            st.dataframe(make_arrow_compatible(orig_skp),
-                         height=550, width="stretch")
+            st.dataframe(make_arrow_compatible(orig_skp), height=550, width="stretch")
         else:
             st.info("Geen origineel rooster beschikbaar.")
 
     with tab_updated:
         if skp_key in sheets:
-            st.dataframe(make_arrow_compatible(
-                sheets[skp_key]), height=550, width="stretch")
+            st.dataframe(make_arrow_compatible(sheets[skp_key]), height=550, width="stretch")
         else:
             st.info("Geen geüpdatet rooster beschikbaar.")
 
@@ -1203,21 +1188,17 @@ if "sheets" in st.session_state:
             p_df_manage = sheets[players_key]
             available_teams_list = get_all_available_teams(sheets)
             diploma_options = ["Geen", "BS1", "BS2", "BS3", "L3", "L4"]
-            season_options = ["Full season",
-                              "1st half season", "2nd half season"]
+            season_options = ["Full season", "1st half season", "2nd half season"]
 
             # 1.1 TUSSENMENU: LID TOEVOEGEN
             with st.expander("➕ Lid toevoegen", expanded=False):
                 with st.form("form_add_member_unified"):
                     new_first = st.text_input("Voornaam:")
                     new_last = st.text_input("Achternaam:")
-                    new_dip = st.selectbox(
-                        "Scheidsrechter Diploma:", diploma_options)
+                    new_dip = st.selectbox("Scheidsrechter Diploma:", diploma_options)
                     new_season = st.selectbox("Seizoenshelft:", season_options)
-                    new_team = st.selectbox(
-                        "Team:", available_teams_list, index=0 if available_teams_list else None)
-                    btn_add = st.form_submit_button(
-                        "➕ Lid toevoegen & Rooster updaten")
+                    new_team = st.selectbox("Team:", available_teams_list, index=0 if available_teams_list else None)
+                    btn_add = st.form_submit_button("➕ Lid toevoegen & Rooster updaten")
 
                     if btn_add:
                         if not new_last.strip():
@@ -1236,16 +1217,13 @@ if "sheets" in st.session_state:
                                 "Table duty": 0,
                                 "Total points": 0.0,
                             }
-                            p_df_manage = pd.concat(
-                                [p_df_manage, pd.DataFrame([new_row])], ignore_index=True)
-                            sheets[players_key] = standardize_players_df(
-                                p_df_manage)
+                            # Invoegen direct onderaan de sectie van het geselecteerde team
+                            p_df_manage = insert_player_into_team(p_df_manage, new_team, new_row)
+                            sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
-                            sheets, warns = auto_reassign_future_schedule(
-                                sheets, days_ahead=7)
+                            sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
-                            st.success(
-                                f"Lid {new_first} {new_last} toegevoegd! Rooster geüpdatet vanaf 7 dagen.")
+                            st.success(f"Lid {new_first} {new_last} toegevoegd aan team {new_team}! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
             # 1.2 TUSSENMENU: LID WIJZIGEN
@@ -1265,8 +1243,7 @@ if "sheets" in st.session_state:
                     member_team = get_member_actual_team(p_df_manage, i)
 
                     if clean_team_code(member_team) == clean_team_code(team_filter_edit):
-                        valid_members_edit.append(
-                            (i, f"{f_val} {l_val} ({member_team})"))
+                        valid_members_edit.append((i, f"{f_val} {l_val} ({member_team})"))
 
                 if valid_members_edit:
                     chosen_idx = st.selectbox(
@@ -1276,16 +1253,11 @@ if "sheets" in st.session_state:
                         key="sel_edit_member_tab"
                     )
 
-                    curr_dip = str(
-                        p_df_manage.at[chosen_idx, "Diploma"]).strip()
-                    dip_idx = diploma_options.index(
-                        curr_dip) if curr_dip in diploma_options else 0
-                    curr_season = str(
-                        p_df_manage.at[chosen_idx, "Full/ half season"]).strip()
-                    seas_idx = season_options.index(
-                        curr_season) if curr_season in season_options else 0
-                    curr_actual_team = get_member_actual_team(
-                        p_df_manage, chosen_idx)
+                    curr_dip = str(p_df_manage.at[chosen_idx, "Diploma"]).strip()
+                    dip_idx = diploma_options.index(curr_dip) if curr_dip in diploma_options else 0
+                    curr_season = str(p_df_manage.at[chosen_idx, "Full/ half season"]).strip()
+                    seas_idx = season_options.index(curr_season) if curr_season in season_options else 0
+                    curr_actual_team = get_member_actual_team(p_df_manage, chosen_idx)
 
                     team_idx = 0
                     for t_i, t_name in enumerate(available_teams_list):
@@ -1294,29 +1266,20 @@ if "sheets" in st.session_state:
                             break
 
                     with st.form("form_edit_member_tab"):
-                        edit_dip = st.selectbox(
-                            "Scheidsrechter Diploma:", diploma_options, index=dip_idx)
-                        edit_season = st.selectbox(
-                            "Seizoenshelft:", season_options, index=seas_idx)
-                        edit_team = st.selectbox(
-                            "Nieuw Team:", available_teams_list, index=team_idx)
-                        btn_update = st.form_submit_button(
-                            "💾 Wijziging opslaan & Rooster updaten")
+                        edit_dip = st.selectbox("Scheidsrechter Diploma:", diploma_options, index=dip_idx)
+                        edit_season = st.selectbox("Seizoenshelft:", season_options, index=seas_idx)
+                        edit_team = st.selectbox("Nieuw Team:", available_teams_list, index=team_idx)
+                        btn_update = st.form_submit_button("💾 Wijziging opslaan & Rooster updaten")
 
                         if btn_update:
-                            p_df_manage.at[chosen_idx,
-                                           "Diploma"] = "" if edit_dip == "Geen" else edit_dip
-                            p_df_manage.at[chosen_idx,
-                                           "Full/ half season"] = edit_season
+                            p_df_manage.at[chosen_idx, "Diploma"] = "" if edit_dip == "Geen" else edit_dip
+                            p_df_manage.at[chosen_idx, "Full/ half season"] = edit_season
                             p_df_manage.at[chosen_idx, "Team"] = edit_team
-                            sheets[players_key] = standardize_players_df(
-                                p_df_manage)
+                            sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
-                            sheets, warns = auto_reassign_future_schedule(
-                                sheets, days_ahead=7)
+                            sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
-                            st.success(
-                                "Gegevens gewijzigd! Rooster geüpdatet vanaf 7 dagen.")
+                            st.success("Gegevens gewijzigd! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
                 else:
                     st.info("Geen leden gevonden voor dit team.")
@@ -1338,8 +1301,7 @@ if "sheets" in st.session_state:
                     m_team = get_member_actual_team(p_df_manage, i)
 
                     if clean_team_code(m_team) == clean_team_code(team_filter_del):
-                        members_to_del.append(
-                            (i, f"{f_val} {l_val} ({m_team})"))
+                        members_to_del.append((i, f"{f_val} {l_val} ({m_team})"))
 
                 if members_to_del:
                     del_idx = st.selectbox(
@@ -1351,8 +1313,7 @@ if "sheets" in st.session_state:
 
                     del_type = st.radio(
                         "Type actie:",
-                        ["Alleen uit team halen",
-                            "Volledig uit vereniging verwijderen"],
+                        ["Alleen uit team halen", "Volledig uit vereniging verwijderen"],
                         key="radio_del_type_tab"
                     )
 
@@ -1361,15 +1322,12 @@ if "sheets" in st.session_state:
                             p_df_manage.at[del_idx, "Team"] = ""
                             msg = "Speler uit het team gehaald! Rooster direct opnieuw ingedeeld."
                         else:
-                            p_df_manage = p_df_manage.drop(
-                                index=del_idx).reset_index(drop=True)
+                            p_df_manage = p_df_manage.drop(index=del_idx).reset_index(drop=True)
                             msg = "Speler definitief verwijderd! Rooster direct opnieuw ingedeeld."
 
-                        sheets[players_key] = standardize_players_df(
-                            p_df_manage)
+                        sheets[players_key] = standardize_players_df(p_df_manage)
                         sheets = update_player_stats(sheets)
-                        sheets, warns = auto_reassign_future_schedule(
-                            sheets, days_ahead=0)
+                        sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=0)
                         st.session_state["assignment_warnings"] = warns
                         st.success(msg)
                         st.rerun()
@@ -1414,8 +1372,7 @@ if "sheets" in st.session_state:
                             default=current_comms_list,
                             key=f"comm_multi_{idx}_{f_name}_{l_name}",
                         )
-                        players_df.at[idx, "Committee"] = ", ".join(
-                            selected_comms)
+                        players_df.at[idx, "Committee"] = ", ".join(selected_comms)
 
             if st.button("💾 Sla Commissies op & Synchroniseer", key="btn_save_comm_menu"):
                 sheets[players_key] = players_df
@@ -1443,8 +1400,7 @@ if "sheets" in st.session_state:
 
             if assign_mode == "Per dag(en)":
                 if "Date" in skp_df_ctrl.columns:
-                    unique_dates = [d for d in skp_df_ctrl["Date"].dropna(
-                    ).unique() if str(d).strip() not in ["", "nan", "None"]]
+                    unique_dates = [d for d in skp_df_ctrl["Date"].dropna().unique() if str(d).strip() not in ["", "nan", "None"]]
 
                     def toggle_all_days_sync():
                         new_val = st.session_state["select_all_assign_days"]
@@ -1467,11 +1423,9 @@ if "sheets" in st.session_state:
                         if chk:
                             chosen_dates.append(d)
 
-                    chosen_dates_norm = {
-                        normalize_date_str(d) for d in chosen_dates}
+                    chosen_dates_norm = {normalize_date_str(d) for d in chosen_dates}
                     for idx_r in skp_df_ctrl.index:
-                        d_row_norm = normalize_date_str(
-                            skp_df_ctrl.at[idx_r, "Date"])
+                        d_row_norm = normalize_date_str(skp_df_ctrl.at[idx_r, "Date"])
                         if d_row_norm in chosen_dates_norm:
                             target_match_indices.append(idx_r)
             else:
@@ -1502,25 +1456,20 @@ if "sheets" in st.session_state:
                 key="slider_max_daily_tasks"
             )
 
-            start_auto_btn = st.button(
-                "🚀 Start indeling voor selectie", key="btn_start_assign")
+            start_auto_btn = st.button("🚀 Start indeling voor selectie", key="btn_start_assign")
 
     if start_auto_btn:
         if not target_match_indices:
-            st.warning(
-                "Geen wedstrijden geselecteerd. Controleer de datumvinkjes.")
+            st.warning("Geen wedstrijden geselecteerd. Controleer de datumvinkjes.")
             st.stop()
 
-        sheets, warns = run_assignment_core(
-            sheets, target_match_indices, max_daily_tasks=max_daily_tasks, preserve_manual=False)
+        sheets, warns = run_assignment_core(sheets, target_match_indices, max_daily_tasks=max_daily_tasks, preserve_manual=False)
         st.session_state["indeling_gedaan"] = True
         st.session_state["assignment_warnings"] = warns
         if warns:
-            st.warning(
-                "Indeling voltooid, maar er zijn openstaande posities. Bekijk het overzicht hierboven.")
+            st.warning("Indeling voltooid, maar er zijn openstaande posities. Bekijk het overzicht hierboven.")
         else:
-            st.success(
-                "Indeling succesvol en evenwichtig uitgevoerd (max. 16 punten per lid)!")
+            st.success("Indeling succesvol en evenwichtig uitgevoerd (max. 16 punten per lid)!")
         st.rerun()
 
     # --- 4. MENU: ROOSTER WISSEN ---
@@ -1555,15 +1504,13 @@ if "sheets" in st.session_state:
 
             elif clear_mode == "Indeling wissen per dag":
                 if "Date" in skp_df_clear.columns:
-                    clear_dates_list = list(
-                        skp_df_clear["Date"].dropna().unique())
+                    clear_dates_list = list(skp_df_clear["Date"].dropna().unique())
                     selected_clear_date = st.selectbox(
                         "Selecteer dag:", clear_dates_list, key="sel_clear_date_box"
                     )
                     if st.button(f"🗑️ Wis {selected_clear_date} (excl. 🔒)", key="btn_clear_day_act"):
                         d_reset_norm = normalize_date_str(selected_clear_date)
-                        mask_reset = skp_df_clear["Date"].apply(
-                            normalize_date_str) == d_reset_norm
+                        mask_reset = skp_df_clear["Date"].apply(normalize_date_str) == d_reset_norm
                         for idx_r in skp_df_clear[mask_reset].index:
                             for t_c in TASK_COLS:
                                 l_col = LOCK_MAP[t_c]
@@ -1600,8 +1547,7 @@ if "sheets" in st.session_state:
                             l_col = LOCK_MAP[t_c]
                             if t_c in skp_df_clear.columns:
                                 is_locked = (
-                                    bool(
-                                        skp_df_clear.at[sel_row_to_clear, l_col])
+                                    bool(skp_df_clear.at[sel_row_to_clear, l_col])
                                     if l_col in skp_df_clear.columns
                                     else False
                                 )
@@ -1642,8 +1588,7 @@ if "sheets" in st.session_state:
                 ):
                     header_row_idx = r
                     for c in range(1, ws.max_column + 1):
-                        val_str = str(
-                            ws.cell(row=r, column=c).value or "").strip()
+                        val_str = str(ws.cell(row=r, column=c).value or "").strip()
                         if val_str:
                             col_name_to_col_idx[val_str.lower()] = c
                     break
