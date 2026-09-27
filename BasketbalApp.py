@@ -155,7 +155,7 @@ def upload_file_to_gdrive(file_bytes):
 
 
 def save_persistent_state(sheets_dict):
-    """Schrijft gewijzigde DataFrames terug naar het Excel-bestand en uploadt naar Google Drive."""
+    """Schrijft de actuele dataframes terug naar Excel-bytes en uploadt naar Google Drive."""
     if "file_bytes" not in st.session_state or not st.session_state["file_bytes"]:
         return
 
@@ -190,13 +190,6 @@ def save_persistent_state(sheets_dict):
                         break
 
                 if header_row_idx is not None:
-                    max_clean_row = max(ws.max_row, header_row_idx + len(clean_df) + 10)
-                    for r in range(header_row_idx + 1, max_clean_row + 1):
-                        for c_idx in col_name_to_col_idx.values():
-                            cell = ws.cell(row=r, column=c_idx)
-                            if not isinstance(cell, MergedCell):
-                                cell.value = None
-
                     for df_col in clean_df.columns:
                         col_key = str(df_col).strip().lower()
                         if col_key in col_name_to_col_idx:
@@ -342,20 +335,24 @@ def determine_division_for_team(team_str, div_map):
 
 
 def parse_date_obj(val):
+    """Robuuste datumherkenning die DD-MM-YYYY voorop stelt en Excel Timestamp correct leest."""
     if pd.isna(val) or val is None or str(val).strip() in ["", "nan", "None"]:
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.date()
+
+    try:
+        dt = pd.to_datetime(val, dayfirst=True)
+        return dt.date()
+    except Exception:
+        pass
+
     s = str(val).strip()
     m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})", s)
     if m:
-        p1, p2, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        d, m_val, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if y < 100:
             y += 2000
-        if p1 > 12:
-            d, m_val = p1, p2
-        else:
-            d, m_val = p2, p1
         try:
             return datetime(y, m_val, d).date()
         except ValueError:
@@ -402,6 +399,38 @@ def calculate_comm_points(comm_str, comm_points_map):
     return sum(comm_points_map.get(c, 0.0) for c in comms)
 
 
+def is_player_eligible_for_date(season_type, date_val):
+    """
+    Controleert of een lid gerechtigd is op basis van de seizoenshelft.
+    1e helft = augustus t/m januari (maand 8, 9, 10, 11, 12, 1).
+    2e helft = februari t/m juli (maand 2, 3, 4, 5, 6, 7).
+    """
+    if not season_type:
+        return True
+
+    st_clean = str(season_type).strip().lower()
+
+    if any(k in st_clean for k in ["full", "heel", "vol", "beide", "all"]):
+        return True
+
+    d_obj = parse_date_obj(date_val)
+    if not d_obj:
+        # Als datum niet achterhaald kan worden, sluit halve-seizoen spelers veiligheidshalve uit
+        return False
+
+    is_first_half = d_obj.month in [8, 9, 10, 11, 12, 1]
+
+    # Match 1e helft
+    if any(k in st_clean for k in ["1st", "1e", "first", "eerste", "1st half", "first half"]):
+        return is_first_half
+
+    # Match 2e helft (inclusief 'second half', '2e helft', etc.)
+    if any(k in st_clean for k in ["2nd", "2e", "second", "tweede", "2nd half", "second half"]):
+        return not is_first_half
+
+    return True
+
+
 def standardize_players_df(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -412,7 +441,7 @@ def standardize_players_df(df):
     col_comm = find_col(df, ["committee", "commissie"])
     col_extra = find_col(df, ["extra", "opmerking", "status", "notes"])
     col_team = find_col(df, ["team", "teamnaam", "spelend team"])
-    col_season = find_col(df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "half"])
+    col_season = find_col(df, ["full/ half season", "full/half season", "season", "seizoen", "half season", "seizoenshelft", "half"])
     col_extra_pts = find_col(df, ["extra points", "extra punten", "commissie punten", "comm points"])
     col_total_pts = find_col(df, ["total points", "totaal punten", "punten"])
 
@@ -559,25 +588,6 @@ def is_player_playing(player_team, date_val, time_val, curr_home, curr_away, bus
     return False
 
 
-def is_player_eligible_for_date(season_type, date_val):
-    if not season_type:
-        return True
-    st_clean = str(season_type).strip().lower()
-    if "full" in st_clean or "heel" in st_clean:
-        return True
-
-    d_obj = parse_date_obj(date_val)
-    if not d_obj:
-        return True
-
-    is_first_half = d_obj.month in [8, 9, 10, 11, 12, 1]
-    if "first" in st_clean or "1st" in st_clean or "1e" in st_clean:
-        return is_first_half
-    elif "second" in st_clean or "2nd" in st_clean or "2e" in st_clean:
-        return not is_first_half
-    return True
-
-
 def update_player_stats(sheets_dict):
     p_k = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
     s_k = find_sheet(sheets_dict, ["SKP", "Rooster"])
@@ -696,49 +706,6 @@ def get_member_actual_team(players_df, target_idx):
             if i == target_idx:
                 return actual if actual else "Overig / Geen Team"
     return "Overig / Geen Team"
-
-
-def insert_player_into_team(players_df, new_row_dict, target_team):
-    """
-    Voegt een nieuwe speler direct in bij het opgegeven team onder de desbetreffende teamkop,
-    in plaats van onderaan het DataFrame te plakken.
-    """
-    df = players_df.copy()
-    col_first = "First name"
-    col_last = "Last name"
-
-    clean_target = clean_team_code(target_team)
-    team_start_idx = None
-
-    for idx, row in df.iterrows():
-        f_val = str(row.get(col_first, "")).strip()
-        l_val = str(row.get(col_last, "")).strip()
-        if l_val in ["nan", "", "none", "None"] and f_val not in ["nan", "", "none", "None"]:
-            if clean_team_code(f_val) == clean_target:
-                team_start_idx = idx
-                break
-
-    if team_start_idx is None:
-        return pd.concat([df, pd.DataFrame([new_row_dict])], ignore_index=True)
-
-    insert_idx = len(df)
-    for idx in range(team_start_idx + 1, len(df)):
-        f_val = str(df.at[idx, col_first]).strip()
-        l_val = str(df.at[idx, col_last]).strip()
-
-        if l_val in ["nan", "", "none", "None"] and f_val not in ["nan", "", "none", "None"]:
-            prev_f = str(df.at[idx - 1, col_first]).strip()
-            prev_l = str(df.at[idx - 1, col_last]).strip()
-            if prev_f in ["", "nan"] and prev_l in ["", "nan"]:
-                insert_idx = idx - 1
-            else:
-                insert_idx = idx
-            break
-
-    df_top = df.iloc[:insert_idx]
-    df_bottom = df.iloc[insert_idx:]
-    df_new = pd.concat([df_top, pd.DataFrame([new_row_dict]), df_bottom], ignore_index=True)
-    return df_new
 
 
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
@@ -1396,13 +1363,13 @@ if "sheets" in st.session_state:
                                 "Table duty": 0,
                                 "Total points": 0.0
                             }
-                            p_df_manage = insert_player_into_team(p_df_manage, new_row, new_team)
+                            p_df_manage = pd.concat([p_df_manage, pd.DataFrame([new_row])], ignore_index=True)
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
                             save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
-                            st.success(f"Lid {new_first} {new_last} toegevoegd aan {new_team}! Rooster geüpdatet vanaf 7 dagen.")
+                            st.success(f"Lid {new_first} {new_last} toegevoegd! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
             # 1.2 TUSSENMENU: LID WIJZIGEN
@@ -1451,19 +1418,9 @@ if "sheets" in st.session_state:
                         btn_update = st.form_submit_button("💾 Wijziging opslaan & Rooster updaten")
 
                         if btn_update:
-                            target_row_data = p_df_manage.loc[chosen_idx].to_dict()
-                            target_row_data["Diploma"] = "" if edit_dip == "Geen" else edit_dip
-                            target_row_data["Full/ half season"] = edit_season
-                            target_row_data["Team"] = edit_team
-
-                            if clean_team_code(edit_team) != clean_team_code(curr_actual_team):
-                                p_df_manage = p_df_manage.drop(index=chosen_idx).reset_index(drop=True)
-                                p_df_manage = insert_player_into_team(p_df_manage, target_row_data, edit_team)
-                            else:
-                                p_df_manage.at[chosen_idx, "Diploma"] = target_row_data["Diploma"]
-                                p_df_manage.at[chosen_idx, "Full/ half season"] = target_row_data["Full/ half season"]
-                                p_df_manage.at[chosen_idx, "Team"] = target_row_data["Team"]
-
+                            p_df_manage.at[chosen_idx, "Diploma"] = "" if edit_dip == "Geen" else edit_dip
+                            p_df_manage.at[chosen_idx, "Full/ half season"] = edit_season
+                            p_df_manage.at[chosen_idx, "Team"] = edit_team
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
                             save_persistent_state(sheets)
@@ -1790,13 +1747,6 @@ if "sheets" in st.session_state:
                     break
 
             if header_row_idx is not None:
-                max_clean_row = max(ws.max_row, header_row_idx + len(clean_df) + 10)
-                for r in range(header_row_idx + 1, max_clean_row + 1):
-                    for c_idx in col_name_to_col_idx.values():
-                        cell = ws.cell(row=r, column=c_idx)
-                        if not isinstance(cell, MergedCell):
-                            cell.value = None
-
                 for df_col in clean_df.columns:
                     col_key = str(df_col).strip().lower()
                     if col_key in col_name_to_col_idx:
