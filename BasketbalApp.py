@@ -54,25 +54,64 @@ uploaded_file = st.sidebar.file_uploader(
     "Upload je Excel-bestand", type=["xlsx"], key="main_file_uploader"
 )
 
+LOCK_ALL_COL = "Lock All"
 LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
+ALL_LOCK_COLS = [LOCK_ALL_COL] + LOCK_COLS
 TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
+
+DUTCH_DAYS = {
+    0: "ma",
+    1: "di",
+    2: "wo",
+    3: "do",
+    4: "vr",
+    5: "za",
+    6: "zo"
+}
 
 
 def ensure_lock_columns(df):
     df_res = df.copy()
-    for col in LOCK_COLS:
+    for col in ALL_LOCK_COLS:
         if col not in df_res.columns:
             df_res[col] = False
         else:
             df_res[col] = df_res[col].fillna(False).astype(bool)
+
+    # Synchroniseer Lock All als alle individuele vinkjes al aanstaan
+    all_locked = df_res[LOCK_COLS].all(axis=1)
+    df_res[LOCK_ALL_COL] = df_res[LOCK_ALL_COL] | all_locked
     return df_res
+
+
+def normalize_time_str(val):
+    if pd.isna(val) or val is None or str(val).strip() in ["", "nan", "None"]:
+        return "00:00"
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return val.strftime("%H:%M")
+    if isinstance(val, time):
+        return val.strftime("%H:%M")
+    s = str(val).strip()
+    m = re.search(r"(\d{1,2}):(\d{2})", s)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return s
+
+
+def format_time_columns_in_df(df):
+    df_clean = df.copy()
+    for col in df_clean.columns:
+        c_lower = str(col).strip().lower()
+        if c_lower in ["time", "tijd", "starttijd", "start time", "eindtijd", "end time"]:
+            df_clean[col] = df_clean[col].apply(lambda v: normalize_time_str(v) if str(v).strip() not in ["", "nan", "None"] else "")
+    return df_clean
 
 
 def make_arrow_compatible(df):
     df_clean = df.copy()
     for col in df_clean.columns:
-        if col in LOCK_COLS:
+        if col in ALL_LOCK_COLS:
             df_clean[col] = df_clean[col].fillna(False).astype(bool)
         elif df_clean[col].dtype == object or str(col) in [
             "Referee 1",
@@ -85,6 +124,11 @@ def make_arrow_compatible(df):
             "Division",
             "Court",
             "Veld",
+            "Dag",
+            "Day",
+            "Date",
+            "Time",
+            "Starttijd"
         ]:
             df_clean[col] = df_clean[col].fillna("").astype(str)
             df_clean[col] = df_clean[col].replace(
@@ -222,20 +266,6 @@ def normalize_date_str(val):
     return s
 
 
-def normalize_time_str(val):
-    if pd.isna(val) or val is None or str(val).strip() in ["", "nan", "None"]:
-        return "00:00"
-    if isinstance(val, (datetime, pd.Timestamp)):
-        return val.strftime("%H:%M")
-    if isinstance(val, time):
-        return val.strftime("%H:%M")
-    s = str(val).strip()
-    m = re.search(r"(\d{1,2}):(\d{2})", s)
-    if m:
-        return f"{int(m.group(1)):02d}:{m.group(2)}"
-    return s
-
-
 def calculate_comm_points(comm_str, comm_points_map):
     if not comm_str or pd.isna(comm_str) or str(comm_str).strip() in ["", "nan", "None"]:
         return 0.0
@@ -346,6 +376,7 @@ def standardize_skp_df(df, div_map=None):
     col_time = find_col(df, ["time", "tijd"])
     col_div = find_col(df, ["division", "divisie", "poule", "klasse", "league", "div"])
     col_court = find_col(df, ["court", "veld", "zaal", "field"])
+    col_dag = find_col(df, ["dag", "day"])
 
     renames = {}
     if col_home and col_home != "Home Team":
@@ -360,6 +391,8 @@ def standardize_skp_df(df, div_map=None):
         renames[col_div] = "Division"
     if col_court and col_court not in ["Court", "Veld"]:
         renames[col_court] = "Court"
+    if col_dag and col_dag not in ["Dag", "Day"]:
+        renames[col_dag] = "Dag"
 
     if renames:
         df = df.rename(columns=renames)
@@ -378,6 +411,7 @@ def standardize_skp_df(df, div_map=None):
     elif "Division" not in df.columns:
         df["Division"] = "Division 5"
 
+    df = format_time_columns_in_df(df)
     df = ensure_lock_columns(df)
     return df
 
@@ -408,7 +442,7 @@ def build_team_busy_slots(all_games_df):
     if all_games_df is not None and not all_games_df.empty:
         for _, row in all_games_df.iterrows():
             d_val = normalize_date_str(row.get("Date"))
-            t_val = normalize_time_str(row.get("Time"))
+            t_val = normalize_time_str(row.get("Time") or row.get("Starttijd"))
             h_team = str(row.get("Home Team", "")).lower()
             a_team = str(row.get("Away Team", "")).lower()
 
@@ -555,6 +589,31 @@ def get_all_available_teams(sheets_dict):
     return sorted(valid_teams, key=lambda x: x.lower())
 
 
+def get_all_tantalus_teams(sheets_dict):
+    """Haalt alle Tantalus-teams op uit Divisions of Players, met nette naamgeving."""
+    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
+    tantalus_teams = []
+    if div_key and div_key in sheets_dict:
+        div_df = sheets_dict[div_key]
+        team_col = find_col(div_df, ["team", "tantalus team", "teams", "teamnaam"], fallback_index=0)
+        if team_col:
+            for t in div_df[team_col].dropna().unique():
+                t_str = str(t).strip()
+                if t_str and t_str not in ["nan", "None"]:
+                    name_full = t_str if "tantalus" in t_str.lower() else f"Tantalus {t_str}"
+                    if name_full not in tantalus_teams:
+                        tantalus_teams.append(name_full)
+
+    if not tantalus_teams:
+        all_teams = get_all_available_teams(sheets_dict)
+        for t in all_teams:
+            name_full = t if "tantalus" in t.lower() else f"Tantalus {t}"
+            if name_full not in tantalus_teams:
+                tantalus_teams.append(name_full)
+
+    return sorted(tantalus_teams, key=lambda x: x.lower())
+
+
 def get_member_actual_team(players_df, target_idx):
     current_team = "Overig / Geen Team"
     for i, r in players_df.iterrows():
@@ -603,6 +662,28 @@ def insert_player_into_team(players_df, target_team_name, new_row_dict):
         res_df = pd.concat([df, new_row_df], ignore_index=True)
 
     return res_df
+
+
+def handle_lock_all_synchronization(old_df, new_df):
+    """Zorgt dat Lock All en de individuele taak-locks synchroon meeschakelen."""
+    synced_df = new_df.copy()
+    if LOCK_ALL_COL not in synced_df.columns:
+        return synced_df
+
+    for idx in synced_df.index:
+        old_all = bool(old_df.at[idx, LOCK_ALL_COL]) if (idx in old_df.index and LOCK_ALL_COL in old_df.columns) else False
+        new_all = bool(synced_df.at[idx, LOCK_ALL_COL])
+
+        if new_all != old_all:
+            # Gebruiker heeft Lock All aangevinkt of uitgevinkt -> zet alle taken mee
+            for l_col in LOCK_COLS:
+                synced_df.at[idx, l_col] = new_all
+        else:
+            # Controleer of alle afzonderlijke slotjes aanstaan
+            all_on = all(bool(synced_df.at[idx, l_c]) for l_c in LOCK_COLS if l_c in synced_df.columns)
+            synced_df.at[idx, LOCK_ALL_COL] = all_on
+
+    return synced_df
 
 
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
@@ -1052,6 +1133,11 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 duty_specific_counter[chosen][col] = duty_specific_counter[chosen].get(col, 0) + 1
                 auto_assigned.add((idx, col))
 
+    # Synchroniseer tenslotte Lock All als alle taken vaststaan
+    for i in skp_df.index:
+        all_on = all(bool(skp_df.at[i, l_c]) for l_c in LOCK_COLS if l_c in skp_df.columns)
+        skp_df.at[i, LOCK_ALL_COL] = all_on
+
     st.session_state["auto_assigned_cells"] = auto_assigned
     sheets_dict[skp_key] = make_arrow_compatible(skp_df)
     sheets_dict = update_player_stats(sheets_dict)
@@ -1079,16 +1165,7 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
 
 
 def validate_schedule_rules(sheets_dict):
-    """
-    Controleert of het huidige rooster voldoet aan alle regels van de code:
-    1. Geen dubbele bezetting (iemand heeft 2 taken tegelijkertijd)
-    2. Speler fluit of tafelt niet tijdens eigen wedstrijd
-    3. Speler voert geen taak uit in een seizoenshelft waar hij/zij niet speelt
-    4. Diploma-eisen per divisie voor scheidsrechters
-    5. Maximum van 16 punten per lid
-    6. Geen taken toegewezen aan vrijgestelde leden (bestuur, coaches, recreanten)
-    7. Geen openstaande taken bij Tantalus-thuiswedstrijden
-    """
+    """Controleert of het rooster aan alle regels voldoet."""
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
     all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
@@ -1182,7 +1259,6 @@ def validate_schedule_rules(sheets_dict):
             if val and val.lower() not in ["nan", "none", "x", ""]:
                 refs_in_match.append((r_c, val))
 
-        # Check tafelaars
         table_needed = ["Scorer", "Timer"]
         if div_num <= 3:
             table_needed.append("24 sec operator")
@@ -1192,7 +1268,6 @@ def validate_schedule_rules(sheets_dict):
                 if not val or val.lower() in ["nan", "none", ""]:
                     violations.append(f"{match_label}: **{t_col}** is niet ingevuld.")
 
-        # Controleer scheidsrechtersniveau per divisie
         ref_dips = []
         for r_col, r_name in refs_in_match:
             dip = player_meta.get(r_name, {}).get("diploma", "NONE")
@@ -1206,13 +1281,11 @@ def validate_schedule_rules(sheets_dict):
             elif div_num == 3 and dip == "NONE":
                 violations.append(f"{match_label}: {r_name} fluit Divisie 3 zonder scheidsrechtersdiploma.")
 
-        # Controleer individuele taken
         for col_name in TASK_COLS:
             person = str(row.get(col_name, "")).strip()
             if not person or person.lower() in ["nan", "none", "x", ""]:
                 continue
 
-            # 1. Gelijktijdige taken (dubbele bezetting)
             slot_key = (person, d_norm, t_norm)
             if slot_key in slot_assignments:
                 prev_match, prev_col = slot_assignments[slot_key]
@@ -1223,24 +1296,20 @@ def validate_schedule_rules(sheets_dict):
             if person in player_meta:
                 p_info = player_meta[person]
 
-                # 2. Speelt zelf
                 if is_player_playing(p_info["team"], date_str, time_str, home, away, busy_game_slots):
                     violations.append(f"{match_label}: {person} staat ingedeeld als **{col_name}**, maar moet zelf spelen met team *{p_info['team']}*.")
 
-                # 3. Seizoenshelft
                 if not is_player_eligible_for_date(p_info["season_type"], date_str):
                     violations.append(f"{match_label}: {person} ({col_name}) is niet actief op {date_str} volgens seizoenshelft ({p_info['season_type']}).")
 
-                # 4. Vrijgesteld
                 if p_info["is_board"] or p_info["is_coach"]:
-                    violations.append(f"{match_label}: {person} ({col_name}) is vrijgesteld van verenigingstaken (Bestuur/Coach).")
+                    violations.append(f"{match_label}: {person} ({col_name}) is vrijgesteld van taken (Bestuur/Coach).")
                 if p_info["is_rec"]:
-                    violations.append(f"{match_label}: {person} ({col_name}) is vrijgesteld van verenigingstaken (Recreant).")
+                    violations.append(f"{match_label}: {person} ({col_name}) is vrijgesteld van taken (Recreant).")
 
-    # 5. Maximum van 16 punten controle
     for p_name, p_data in player_meta.items():
         if p_data["total_pts"] > 16.0:
-            violations.append(f"**{p_name}** overschrijdt het maximum van 16 punten (Heeft momenteel {p_data['total_pts']:.1f} punten).")
+            violations.append(f"**{p_name}** overschrijdt het maximum van 16 punten ({p_data['total_pts']:.1f} punten).")
 
     return violations
 
@@ -1285,6 +1354,8 @@ if uploaded_file is not None:
                     if col in df.columns:
                         df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
                 df = sort_skp_schedule(df)
+            elif "game" in sheet.lower():
+                df = format_time_columns_in_df(df)
             orig_sheets[sheet] = df
 
         st.session_state["original_sheets"] = copy.deepcopy(orig_sheets)
@@ -1313,6 +1384,8 @@ if "sheets" in st.session_state:
 
     if skp_key in sheets:
         sheets[skp_key] = standardize_skp_df(sheets[skp_key], div_map=tantalus_div_map)
+    if all_games_key in sheets:
+        sheets[all_games_key] = format_time_columns_in_df(sheets[all_games_key])
 
     tab_names = list(sheets.keys())
     col_sel_sheet, _ = st.columns([1, 2])
@@ -1328,10 +1401,15 @@ if "sheets" in st.session_state:
 
     column_config = {}
     if selected_tab == skp_key:
+        column_config[LOCK_ALL_COL] = st.column_config.CheckboxColumn(
+            "🔒 All",
+            help="Zet direct alle 5 taken voor deze wedstrijd vast.",
+            default=False,
+        )
         for l_col in LOCK_COLS:
             column_config[l_col] = st.column_config.CheckboxColumn(
                 f"🔒 {l_col.replace('Lock ', '')}",
-                help="Vink aan om deze taak vast te zetten.",
+                help="Vink aan om deze specifieke taak vast te zetten.",
                 default=False,
             )
 
@@ -1344,40 +1422,34 @@ if "sheets" in st.session_state:
     )
 
     if not edited_df.equals(sheets[selected_tab]):
+        if selected_tab == skp_key:
+            edited_df = handle_lock_all_synchronization(sheets[selected_tab], edited_df)
         sheets[selected_tab] = edited_df
         sheets = update_player_stats(sheets)
         st.rerun()
 
-    # --- MELDINGENVENSTERS EN STATUS ---
-    st.divider()
+    # --- MELDINGENVENSTER VOOR OPENSTAANDE PLEKKEN ---
     if st.session_state.get("assignment_warnings"):
-        with st.expander("⚠️ Meldingenoverzicht: Waarom scheidsrechterplekken openstaan", expanded=True):
-            st.error("Niet alle scheidsrechterposities konden automatisch worden ingedeeld:")
+        with st.expander("⚠️ Meldingenoverzicht: Waarom scheidsrechterplekken openstaan", expanded=False):
+            st.error("Niet alle posities konden automatisch worden ingedeeld:")
             for w in st.session_state["assignment_warnings"]:
                 st.markdown(f"**🏀 {w['match']}** - *{w['slot']}*:")
                 for r_line in w["reasons"]:
                     st.write(f"- {r_line}")
 
-    # --- VENSTER VOOR REGELVALIDATIE ---
+    # --- REGELVALIDATIE RESULTATEN VENSTER ---
     if st.session_state.get("validation_results") is not None:
         v_issues = st.session_state["validation_results"]
         if not v_issues:
-            st.success("✅ **Het rooster voldoet aan alle regels!** Er zijn geen conflicten, ontbrekende taken of schendingen gevonden.")
+            st.success("✅ **Het rooster voldoet aan alle regels!** Geen dubbele boekingen, diploma-conflicten of openstaande taken.")
         else:
-            with st.expander(f"❌ **Regelvalidatie: {len(v_issues)} knelpunten gevonden**", expanded=True):
-                st.error("De onderstaande toewijzingen of posities voldoen niet aan de regels van het systeem:")
+            with st.expander(f"❌ **Regelvalidatie: {len(v_issues)} knelpunten gevonden**", expanded=False):
+                st.error("De volgende toewijzingen of posities voldoen niet aan de regels van het systeem:")
                 for issue in v_issues:
                     st.markdown(f"- {issue}")
 
-    # --- GEÜPDATET ROOSTER WEERGAVE ---
-    st.subheader("📋 Geüpdatet Rooster")
-    if skp_key in sheets:
-        st.dataframe(make_arrow_compatible(sheets[skp_key]), height=550, width="stretch")
-    else:
-        st.info("Geen geüpdatet rooster beschikbaar.")
-
     # =========================================================================
-    # ZIJBALK STRUCTUUR: EXACT IN VOLGORDE (1 T/M 7)
+    # ZIJBALK STRUCTUUR
     # =========================================================================
 
     # --- 1. MENU: LEDENBEHEER ---
@@ -1389,7 +1461,6 @@ if "sheets" in st.session_state:
             diploma_options = ["Geen", "BS1", "BS2", "BS3", "L3", "L4"]
             season_options = ["Full season", "1st half season", "2nd half season"]
 
-            # 1.1 TUSSENMENU: LID TOEVOEGEN
             with st.expander("➕ Lid toevoegen", expanded=False):
                 with st.form("form_add_member_unified"):
                     new_first = st.text_input("Voornaam:")
@@ -1424,7 +1495,6 @@ if "sheets" in st.session_state:
                             st.success(f"Lid {new_first} {new_last} toegevoegd aan team {new_team}! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
-            # 1.2 TUSSENMENU: LID WIJZIGEN
             with st.expander("✏️ Lid wijzigen", expanded=False):
                 team_filter_edit = st.selectbox(
                     "Kies team:",
@@ -1482,7 +1552,6 @@ if "sheets" in st.session_state:
                 else:
                     st.info("Geen leden gevonden voor dit team.")
 
-            # 1.3 TUSSENMENU: LID VERWIJDEREN
             with st.expander("🗑️ Lid verwijderen", expanded=False):
                 team_filter_del = st.selectbox(
                     "Kies team van de speler:",
@@ -1549,7 +1618,7 @@ if "sheets" in st.session_state:
             for team_name, player_indices in team_player_groups.items():
                 if not player_indices:
                     continue
-                with st.expander(f"🏀 {team_name} ({len(player_indices)} spelers)"):
+                with st.expander(f"🏀 {team_name} ({len(player_indices)} spelers)", expanded=False):
                     for idx in player_indices:
                         f_name = str(players_df.at[idx, "First name"])
                         l_name = str(players_df.at[idx, "Last name"])
@@ -1587,32 +1656,52 @@ if "sheets" in st.session_state:
         if skp_key in sheets:
             skp_df_games = sheets[skp_key]
             court_col = "Court" if "Court" in skp_df_games.columns else ("Veld" if "Veld" in skp_df_games.columns else "Court")
+            dag_col = "Dag" if "Dag" in skp_df_games.columns else ("Day" if "Day" in skp_df_games.columns else None)
+            tantalus_teams_list = get_all_tantalus_teams(sheets)
 
-            # 3.1 WEDSTRIJD TOEVOEGEN (INVOERVELDEN ONDER ELKAAR)
+            # 3.1 WEDSTRIJD TOEVOEGEN
             with st.expander("➕ Wedstrijd Toevoegen", expanded=False):
                 with st.form("form_add_game"):
                     m_date_input = st.date_input("Datum:", value=datetime.now().date())
                     m_time_input = st.time_input("Tijdstip:", value=time(19, 0))
-                    
-                    # Invoervelden recht onder elkaar geplaatst
-                    m_home_input = st.text_input("Thuis team (bijv. Tantalus MSE 2):")
+
+                    # Dropdown voor Tantalus thuisteam
+                    if tantalus_teams_list:
+                        m_home_input = st.selectbox("Thuis team (Tantalus):", tantalus_teams_list)
+                    else:
+                        m_home_input = st.text_input("Thuis team:", value="Tantalus MSE 1")
+
+                    # Vrij invulveld voor uit-team
                     m_away_input = st.text_input("Uit team:")
                     m_court_input = st.text_input("Veld / Zaal (Court):", value="Veld 1")
-                    
+
                     btn_add_game = st.form_submit_button("➕ Voeg wedstrijd toe aan rooster")
 
                     if btn_add_game:
-                        if not m_home_input.strip() or not m_away_input.strip():
+                        if not str(m_home_input).strip() or not m_away_input.strip():
                             st.error("Zowel thuis- als uitteam zijn verplicht!")
                         else:
-                            d_str = m_date_input.strftime("%d-%m-%Y")
+                            day_abbr = DUTCH_DAYS.get(m_date_input.weekday(), "")
+                            date_only = m_date_input.strftime("%d-%m-%Y")
+
+                            # Detecteer bestaande datumnotatie in de sheet
+                            sample_date = ""
+                            if "Date" in skp_df_games.columns and not skp_df_games["Date"].dropna().empty:
+                                sample_date = str(skp_df_games["Date"].dropna().iloc[0]).lower()
+
+                            has_day_in_date_col = any(d in sample_date for d in ["ma", "di", "wo", "do", "vr", "za", "zo"])
+                            if has_day_in_date_col:
+                                formatted_date_entry = f"{day_abbr} {date_only}"
+                            else:
+                                formatted_date_entry = date_only
+
                             t_str = m_time_input.strftime("%H:%M")
                             d_num = determine_division_for_team(m_home_input.strip(), tantalus_div_map)
 
                             new_game_row = {
-                                "Date": d_str,
+                                "Date": formatted_date_entry,
                                 "Time": t_str,
-                                "Home Team": m_home_input.strip(),
+                                "Home Team": str(m_home_input).strip(),
                                 "Away Team": m_away_input.strip(),
                                 "Division": f"Division {d_num}",
                                 court_col: m_court_input.strip(),
@@ -1621,12 +1710,16 @@ if "sheets" in st.session_state:
                                 "Scorer": "",
                                 "Timer": "",
                                 "24 sec operator": "",
+                                LOCK_ALL_COL: False,
                                 "Lock Ref 1": False,
                                 "Lock Ref 2": False,
                                 "Lock Scorer": False,
                                 "Lock Timer": False,
                                 "Lock 24s": False,
                             }
+                            if dag_col:
+                                new_game_row[dag_col] = day_abbr
+
                             for col in skp_df_games.columns:
                                 if col not in new_game_row:
                                     new_game_row[col] = ""
@@ -1635,7 +1728,7 @@ if "sheets" in st.session_state:
                             skp_df_games = sort_skp_schedule(skp_df_games)
                             sheets[skp_key] = make_arrow_compatible(skp_df_games)
                             sheets = update_player_stats(sheets)
-                            st.success(f"Wedstrijd {m_home_input} vs {m_away_input} op {d_str} chronologisch ingevoegd!")
+                            st.success(f"Wedstrijd {m_home_input} vs {m_away_input} op {formatted_date_entry} om {t_str} chronologisch ingevoegd!")
                             st.rerun()
 
             # 3.2 WEDSTRIJD VERWIJDEREN
@@ -1672,7 +1765,7 @@ if "sheets" in st.session_state:
     target_match_indices = []
     start_auto_btn = False
 
-    with st.sidebar.expander("🤖 4. Rooster Indelen", expanded=True):
+    with st.sidebar.expander("🤖 4. Rooster Indelen", expanded=False):
         if skp_key in sheets:
             skp_df_ctrl = sheets[skp_key]
 
@@ -1757,9 +1850,9 @@ if "sheets" in st.session_state:
             st.success("Indeling succesvol en evenwichtig uitgevoerd (max. 16 punten per lid)!")
         st.rerun()
 
-    # --- 5. MENU: ROOSTER CONTROLEREN / VALIDEREN ---
+    # --- 5. MENU: ROOSTER VALIDEREN ---
     st.sidebar.divider()
-    with st.sidebar.expander("🔍 5. Rooster Valideren", expanded=True):
+    with st.sidebar.expander("🔍 5. Rooster Valideren", expanded=False):
         st.caption("Controleer of de huidige indeling voldoet aan alle regels (dubbele boekingen, licenties, speeltijden, max. punten).")
         if st.button("🔍 Valideer Rooster", key="btn_validate_rules"):
             val_issues = validate_schedule_rules(sheets)
@@ -1868,7 +1961,7 @@ if "sheets" in st.session_state:
             ws = wb_download[sheet_name]
             clean_df = df.copy()
 
-            for col_l in LOCK_COLS:
+            for col_l in ALL_LOCK_COLS:
                 if col_l in clean_df.columns:
                     clean_df = clean_df.drop(columns=[col_l])
 
