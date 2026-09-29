@@ -79,7 +79,6 @@ def ensure_lock_columns(df):
         else:
             df_res[col] = df_res[col].fillna(False).astype(bool)
 
-    # Synchroniseer Lock All als alle individuele vinkjes al aanstaan
     all_locked = df_res[LOCK_COLS].all(axis=1)
     df_res[LOCK_ALL_COL] = df_res[LOCK_ALL_COL] | all_locked
     return df_res
@@ -590,7 +589,6 @@ def get_all_available_teams(sheets_dict):
 
 
 def get_all_tantalus_teams(sheets_dict):
-    """Haalt alle Tantalus-teams op uit Divisions of Players, met nette naamgeving."""
     div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
     tantalus_teams = []
     if div_key and div_key in sheets_dict:
@@ -665,7 +663,6 @@ def insert_player_into_team(players_df, target_team_name, new_row_dict):
 
 
 def handle_lock_all_synchronization(old_df, new_df):
-    """Zorgt dat Lock All en de individuele taak-locks synchroon meeschakelen."""
     synced_df = new_df.copy()
     if LOCK_ALL_COL not in synced_df.columns:
         return synced_df
@@ -675,11 +672,9 @@ def handle_lock_all_synchronization(old_df, new_df):
         new_all = bool(synced_df.at[idx, LOCK_ALL_COL])
 
         if new_all != old_all:
-            # Gebruiker heeft Lock All aangevinkt of uitgevinkt -> zet alle taken mee
             for l_col in LOCK_COLS:
                 synced_df.at[idx, l_col] = new_all
         else:
-            # Controleer of alle afzonderlijke slotjes aanstaan
             all_on = all(bool(synced_df.at[idx, l_c]) for l_c in LOCK_COLS if l_c in synced_df.columns)
             synced_df.at[idx, LOCK_ALL_COL] = all_on
 
@@ -1133,7 +1128,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 duty_specific_counter[chosen][col] = duty_specific_counter[chosen].get(col, 0) + 1
                 auto_assigned.add((idx, col))
 
-    # Synchroniseer tenslotte Lock All als alle taken vaststaan
     for i in skp_df.index:
         all_on = all(bool(skp_df.at[i, l_c]) for l_c in LOCK_COLS if l_c in skp_df.columns)
         skp_df.at[i, LOCK_ALL_COL] = all_on
@@ -1162,6 +1156,188 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
         current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
         return run_assignment_core(sheets_dict, target_indices, max_daily_tasks=current_max_tasks, preserve_manual=True)
     return sheets_dict, []
+
+
+def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
+    """
+    Past de divisie van een team aan op:
+    1. Divisions sheet
+    2. SKP sheet
+    3. All games sheet
+    """
+    c_target = clean_team_code(team_name)
+    new_div_str = f"Division {new_div_number}"
+
+    # 1. Update Divisions sheet
+    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
+    if div_key and div_key in sheets_dict:
+        div_df = sheets_dict[div_key].copy()
+        team_col = find_col(div_df, ["team", "tantalus team", "teams", "teamnaam"], fallback_index=0)
+        div_col = find_col(div_df, ["division", "divisie", "klasse", "poule"], fallback_index=1 if len(div_df.columns) > 1 else 0)
+
+        matched = False
+        for idx_d, r_d in div_df.iterrows():
+            if clean_team_code(r_d.get(team_col)) == c_target:
+                div_df.at[idx_d, div_col] = new_div_str
+                matched = True
+
+        if not matched and team_col and div_col:
+            new_row_div = {c: "" for c in div_df.columns}
+            new_row_div[team_col] = team_name
+            new_row_div[div_col] = new_div_str
+            div_df = pd.concat([div_df, pd.DataFrame([new_row_div])], ignore_index=True)
+
+        sheets_dict[div_key] = div_df
+
+    # 2. Update SKP sheet
+    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
+    affected_match_indices = []
+    if skp_key and skp_key in sheets_dict:
+        skp_df = sheets_dict[skp_key].copy()
+        for idx_s, r_s in skp_df.iterrows():
+            h_team = str(r_s.get("Home Team", "")).strip()
+            if clean_team_code(h_team) == c_target:
+                skp_df.at[idx_s, "Division"] = new_div_str
+                affected_match_indices.append(idx_s)
+        sheets_dict[skp_key] = skp_df
+
+    # 3. Update All games sheet
+    all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
+    if all_games_key and all_games_key in sheets_dict:
+        all_games_df = sheets_dict[all_games_key].copy()
+        div_col_all = find_col(all_games_df, ["division", "divisie", "poule", "klasse"])
+        if not div_col_all:
+            all_games_df["Division"] = ""
+            div_col_all = "Division"
+
+        for idx_a, r_a in all_games_df.iterrows():
+            h_team = str(r_a.get("Home Team", "")).strip()
+            a_team = str(r_a.get("Away Team", "")).strip()
+            if clean_team_code(h_team) == c_target or clean_team_code(a_team) == c_target:
+                all_games_df.at[idx_a, div_col_all] = new_div_str
+        sheets_dict[all_games_key] = all_games_df
+
+    return sheets_dict, affected_match_indices
+
+
+def reassign_invalid_referees_after_division_change(sheets_dict, affected_indices):
+    """
+    Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
+    waarvan de divisie is gewijzigd, en logt alle vervangingen.
+    """
+    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
+    players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
+    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
+
+    if not skp_key or not affected_indices:
+        return sheets_dict, []
+
+    skp_df = sheets_dict[skp_key].copy()
+    players_df = standardize_players_df(sheets_dict.get(players_key, pd.DataFrame()))
+    tantalus_div_map = build_division_map(sheets_dict.get(div_key, pd.DataFrame()))
+
+    player_dips = {}
+    for _, p_r in players_df.iterrows():
+        f = str(p_r.get("First name", "")).strip()
+        l = str(p_r.get("Last name", "")).strip()
+        if not l or l.lower() in ["nan", "none"]:
+            continue
+        full_n = f"{f} {l}".strip()
+        d_val = str(p_r.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
+        if "L4" in d_val: norm = "L4"
+        elif "L3" in d_val: norm = "L3"
+        elif "BS3" in d_val: norm = "BS3"
+        elif "BS2" in d_val: norm = "BS2"
+        elif "BS1" in d_val: norm = "BS1"
+        else: norm = "NONE"
+        player_dips[full_n] = norm
+
+    change_logs = []
+    indices_to_rerun = set()
+
+    for idx in affected_indices:
+        home_team = str(skp_df.at[idx, "Home Team"]).strip()
+        away_team = str(skp_df.at[idx, "Away Team"]).strip()
+        div_num = determine_division_for_team(home_team, tantalus_div_map)
+        match_desc = f"{skp_df.at[idx, 'Date']} {skp_df.at[idx, 'Time']} ({home_team} vs {away_team})"
+
+        for ref_col in ["Referee 1", "Referee 2"]:
+            l_col = LOCK_MAP[ref_col]
+            is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+            curr_ref = str(skp_df.at[idx, ref_col]).strip()
+
+            if is_locked or not curr_ref or curr_ref.lower() in ["nan", "none", "x"]:
+                continue
+
+            ref_dip = player_dips.get(curr_ref, "NONE")
+            is_invalid = False
+            reason_str = ""
+
+            if div_num <= 1 and ref_dip not in ["L4", "L3", "BS3", "BS2", "BS1"]:
+                is_invalid = True
+                reason_str = f"heeft niveau '{ref_dip}' maar Divisie {div_num} vereist minimaal BS3/BS2"
+            elif div_num == 2 and ref_dip == "NONE":
+                is_invalid = True
+                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 2"
+            elif div_num == 3 and ref_dip == "NONE":
+                is_invalid = True
+                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 3"
+
+            if is_invalid:
+                skp_df.at[idx, ref_col] = ""
+                indices_to_rerun.add(idx)
+                change_logs.append({
+                    "match": match_desc,
+                    "task": ref_col,
+                    "old_person": curr_ref,
+                    "new_person": "Wordt heringedeeld",
+                    "reason": reason_str
+                })
+
+        # Bij degradatie naar Div 4+ vervalt de 24 sec operator
+        if div_num > 3:
+            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
+            l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
+            if curr_24s and curr_24s.lower() not in ["nan", "none", ""] and not l_24s:
+                skp_df.at[idx, "24 sec operator"] = ""
+                change_logs.append({
+                    "match": match_desc,
+                    "task": "24 sec operator",
+                    "old_person": curr_24s,
+                    "new_person": "Geen (taak vervalt)",
+                    "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
+                })
+
+        # Bij promotie naar Div 1-3 is 24 sec operator juist vereist
+        if div_num <= 3:
+            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
+            if not curr_24s or curr_24s.lower() in ["nan", "none"]:
+                indices_to_rerun.add(idx)
+
+    sheets_dict[skp_key] = skp_df
+
+    if indices_to_rerun:
+        current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
+        sheets_dict, _ = run_assignment_core(
+            sheets_dict,
+            list(indices_to_rerun),
+            max_daily_tasks=current_max_tasks,
+            preserve_manual=True
+        )
+
+        # Werk de logs bij met de nieuw toegewezen namen
+        skp_df_updated = sheets_dict[skp_key]
+        for log in change_logs:
+            if log["new_person"] == "Wordt heringedeeld":
+                for idx_m in indices_to_rerun:
+                    h_m = str(skp_df_updated.at[idx_m, "Home Team"]).strip()
+                    a_m = str(skp_df_updated.at[idx_m, "Away Team"]).strip()
+                    m_str = f"{skp_df_updated.at[idx_m, 'Date']} {skp_df_updated.at[idx_m, 'Time']} ({h_m} vs {a_m})"
+                    if m_str == log["match"]:
+                        assigned_now = str(skp_df_updated.at[idx_m, log["task"]]).strip()
+                        log["new_person"] = assigned_now if assigned_now else "Openstaand (geen geldige arbiter beschikbaar)"
+
+    return sheets_dict, change_logs
 
 
 def validate_schedule_rules(sheets_dict):
@@ -1362,6 +1538,7 @@ if uploaded_file is not None:
         st.session_state["sheets"] = copy.deepcopy(orig_sheets)
         st.session_state["indeling_gedaan"] = False
         st.session_state["assignment_warnings"] = []
+        st.session_state["division_change_logs"] = []
         st.session_state["validation_results"] = None
         st.session_state["auto_assigned_cells"] = set()
         st.rerun()
@@ -1428,6 +1605,16 @@ if "sheets" in st.session_state:
         sheets = update_player_stats(sheets)
         st.rerun()
 
+    # --- MELDINGENVENSTER VOOR DIVISIE WIJZIGINGEN & VERVANGEN SCHEIDSRECHTERS ---
+    if st.session_state.get("division_change_logs"):
+        with st.expander("🔄 Wijzigingenoverzicht: Vervangen taken & scheidsrechters na divisiewijziging", expanded=True):
+            st.info("De divisie van een team is gewijzigd. Hieronder staan de posities die automatisch zijn aangepast of vervangen om aan de regels te voldoen:")
+            for log in st.session_state["division_change_logs"]:
+                st.markdown(
+                    f"- **{log['match']}** | **{log['task']}**: `{log['old_person']}` ➔ **{log['new_person']}** "
+                    f"*(Reden: {log['reason']})*"
+                )
+
     # --- MELDINGENVENSTER VOOR OPENSTAANDE PLEKKEN ---
     if st.session_state.get("assignment_warnings"):
         with st.expander("⚠️ Meldingenoverzicht: Waarom scheidsrechterplekken openstaan", expanded=False):
@@ -1452,15 +1639,58 @@ if "sheets" in st.session_state:
     # ZIJBALK STRUCTUUR
     # =========================================================================
 
-    # --- 1. MENU: LEDENBEHEER ---
+    # --- 1. MENU: LEDENBEHEER (INCL. TEAMBEHEER / DIVISIE WIJZIGEN) ---
     st.sidebar.divider()
     with st.sidebar.expander("👤 1. Ledenbeheer", expanded=False):
         if players_key in sheets:
             p_df_manage = sheets[players_key]
             available_teams_list = get_all_available_teams(sheets)
+            tantalus_teams_list = get_all_tantalus_teams(sheets)
             diploma_options = ["Geen", "BS1", "BS2", "BS3", "L3", "L4"]
             season_options = ["Full season", "1st half season", "2nd half season"]
 
+            # 1.1 TEAMDIVISIE WIJZIGEN (PROMOTIE / DEGRADATIE)
+            with st.expander("🏆 Teamdivisie wijzigen", expanded=False):
+                st.caption("Wijzig de divisie van een team bij promotie of degradatie. Sheets en taken worden direct bijgewerkt.")
+                team_choices_for_div = tantalus_teams_list if tantalus_teams_list else available_teams_list
+                if team_choices_for_div:
+                    chosen_div_team = st.selectbox(
+                        "Kies team:",
+                        team_choices_for_div,
+                        key="sel_team_for_div_change"
+                    )
+
+                    curr_team_div_num = determine_division_for_team(chosen_div_team, tantalus_div_map)
+                    div_options_list = [f"Division {i}" for i in range(1, 7)]
+                    curr_div_idx = (curr_team_div_num - 1) if (1 <= curr_team_div_num <= 6) else 4
+
+                    new_div_selected = st.selectbox(
+                        "Kies nieuwe divisie:",
+                        div_options_list,
+                        index=curr_div_idx,
+                        key="sel_new_div_for_team"
+                    )
+
+                    new_div_num_val = int(new_div_selected.replace("Division ", "").strip())
+
+                    if st.button("💾 Pas divisie aan & update rooster", key="btn_apply_div_change"):
+                        sheets, aff_indices = update_team_division_across_sheets(
+                            sheets, chosen_div_team, new_div_num_val
+                        )
+                        sheets, change_logs = reassign_invalid_referees_after_division_change(
+                            sheets, aff_indices
+                        )
+                        st.session_state["division_change_logs"] = change_logs
+                        st.session_state["validation_results"] = None
+                        if change_logs:
+                            st.success(f"Divisie van {chosen_div_team} gewijzigd naar {new_div_selected}! {len(change_logs)} ta(a)k(en) automatisch vervangen.")
+                        else:
+                            st.success(f"Divisie van {chosen_div_team} gewijzigd naar {new_div_selected}! Huidige scheidsrechters voldeden reeds aan de regels.")
+                        st.rerun()
+                else:
+                    st.info("Geen teams gevonden.")
+
+            # 1.2 LID TOEVOEGEN
             with st.expander("➕ Lid toevoegen", expanded=False):
                 with st.form("form_add_member_unified"):
                     new_first = st.text_input("Voornaam:")
@@ -1495,6 +1725,7 @@ if "sheets" in st.session_state:
                             st.success(f"Lid {new_first} {new_last} toegevoegd aan team {new_team}! Rooster geüpdatet vanaf 7 dagen.")
                             st.rerun()
 
+            # 1.3 LID WIJZIGEN
             with st.expander("✏️ Lid wijzigen", expanded=False):
                 team_filter_edit = st.selectbox(
                     "Kies team:",
@@ -1552,6 +1783,7 @@ if "sheets" in st.session_state:
                 else:
                     st.info("Geen leden gevonden voor dit team.")
 
+            # 1.4 LID VERWIJDEREN
             with st.expander("🗑️ Lid verwijderen", expanded=False):
                 team_filter_del = st.selectbox(
                     "Kies team van de speler:",
@@ -1650,7 +1882,7 @@ if "sheets" in st.session_state:
                 )
                 st.rerun()
 
-    # --- 3. MENU: WEDSTRIJDBEHEER (BOVEN ROOSTER INDELEN) ---
+    # --- 3. MENU: WEDSTRIJDBEHEER ---
     st.sidebar.divider()
     with st.sidebar.expander("📅 3. Wedstrijdbeheer", expanded=False):
         if skp_key in sheets:
@@ -1665,13 +1897,11 @@ if "sheets" in st.session_state:
                     m_date_input = st.date_input("Datum:", value=datetime.now().date())
                     m_time_input = st.time_input("Tijdstip:", value=time(19, 0))
 
-                    # Dropdown voor Tantalus thuisteam
                     if tantalus_teams_list:
                         m_home_input = st.selectbox("Thuis team (Tantalus):", tantalus_teams_list)
                     else:
                         m_home_input = st.text_input("Thuis team:", value="Tantalus MSE 1")
 
-                    # Vrij invulveld voor uit-team
                     m_away_input = st.text_input("Uit team:")
                     m_court_input = st.text_input("Veld / Zaal (Court):", value="Veld 1")
 
@@ -1684,7 +1914,6 @@ if "sheets" in st.session_state:
                             day_abbr = DUTCH_DAYS.get(m_date_input.weekday(), "")
                             date_only = m_date_input.strftime("%d-%m-%Y")
 
-                            # Detecteer bestaande datumnotatie in de sheet
                             sample_date = ""
                             if "Date" in skp_df_games.columns and not skp_df_games["Date"].dropna().empty:
                                 sample_date = str(skp_df_games["Date"].dropna().iloc[0]).lower()
@@ -1887,6 +2116,7 @@ if "sheets" in st.session_state:
                     sheets = update_player_stats(sheets)
                     st.session_state["assignment_warnings"] = []
                     st.session_state["validation_results"] = None
+                    st.session_state["division_change_logs"] = []
                     st.session_state["auto_assigned_cells"] = set()
                     st.rerun()
 
@@ -1914,6 +2144,7 @@ if "sheets" in st.session_state:
                         sheets = update_player_stats(sheets)
                         st.session_state["assignment_warnings"] = []
                         st.session_state["validation_results"] = None
+                        st.session_state["division_change_logs"] = []
                         st.rerun()
 
             else:
@@ -1946,6 +2177,7 @@ if "sheets" in st.session_state:
                         sheets = update_player_stats(sheets)
                         st.session_state["assignment_warnings"] = []
                         st.session_state["validation_results"] = None
+                        st.session_state["division_change_logs"] = []
                         st.rerun()
 
     # --- 7. MENU: OPSLAAN & DOWNLOADEN ---
