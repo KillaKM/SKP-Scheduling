@@ -681,6 +681,81 @@ def handle_lock_all_synchronization(old_df, new_df):
     return synced_df
 
 
+def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
+    """
+    Past de divisie van een team aan op:
+    1. Divisions sheet (voorkomt LossySetitemError/TypeError via .loc en .astype(object))
+    2. SKP sheet
+    3. All games sheet
+    """
+    c_target = clean_team_code(team_name)
+    new_div_str = f"Division {new_div_number}"
+
+    # 1. Update Divisions sheet
+    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
+    if div_key and div_key in sheets_dict:
+        div_df = sheets_dict[div_key].copy()
+        team_col = find_col(div_df, ["team", "tantalus team", "teams", "teamnaam"], fallback_index=0)
+        div_col = find_col(div_df, ["division", "divisie", "klasse", "poule"], fallback_index=1 if len(div_df.columns) > 1 else 0)
+
+        if div_col:
+            sample_val = str(div_df[div_col].dropna().iloc[0]).strip().lower() if not div_df[div_col].dropna().empty else ""
+            use_raw_number = sample_val.isdigit()
+
+            div_df[div_col] = div_df[div_col].astype(object)
+            target_div_val = int(new_div_number) if use_raw_number else new_div_str
+
+            matched = False
+            for idx_d in div_df.index:
+                if clean_team_code(div_df.at[idx_d, team_col]) == c_target:
+                    div_df.loc[idx_d, div_col] = target_div_val
+                    matched = True
+
+            if not matched and team_col:
+                new_row_div = {c: "" for c in div_df.columns}
+                new_row_div[team_col] = team_name
+                new_row_div[div_col] = target_div_val
+                div_df = pd.concat([div_df, pd.DataFrame([new_row_div])], ignore_index=True)
+
+            sheets_dict[div_key] = div_df
+
+    # 2. Update SKP sheet
+    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
+    affected_match_indices = []
+    if skp_key and skp_key in sheets_dict:
+        skp_df = sheets_dict[skp_key].copy()
+        if "Division" not in skp_df.columns:
+            skp_df["Division"] = ""
+        skp_df["Division"] = skp_df["Division"].astype(object)
+
+        for idx_s in skp_df.index:
+            h_team = str(skp_df.at[idx_s, "Home Team"]).strip()
+            if clean_team_code(h_team) == c_target:
+                skp_df.loc[idx_s, "Division"] = new_div_str
+                affected_match_indices.append(idx_s)
+        sheets_dict[skp_key] = skp_df
+
+    # 3. Update All games sheet
+    all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
+    if all_games_key and all_games_key in sheets_dict:
+        all_games_df = sheets_dict[all_games_key].copy()
+        div_col_all = find_col(all_games_df, ["division", "divisie", "poule", "klasse"])
+        if not div_col_all:
+            all_games_df["Division"] = ""
+            div_col_all = "Division"
+
+        all_games_df[div_col_all] = all_games_df[div_col_all].astype(object)
+
+        for idx_a in all_games_df.index:
+            h_team = str(all_games_df.at[idx_a, "Home Team"]).strip()
+            a_team = str(all_games_df.at[idx_a, "Away Team"]).strip()
+            if clean_team_code(h_team) == c_target or clean_team_code(a_team) == c_target:
+                all_games_df.loc[idx_a, div_col_all] = new_div_str
+        sheets_dict[all_games_key] = all_games_df
+
+    return sheets_dict, affected_match_indices
+
+
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"]) or "SKP"
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"]) or "Players"
@@ -1158,68 +1233,6 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
     return sheets_dict, []
 
 
-def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
-    """
-    Past de divisie van een team aan op:
-    1. Divisions sheet
-    2. SKP sheet
-    3. All games sheet
-    """
-    c_target = clean_team_code(team_name)
-    new_div_str = f"Division {new_div_number}"
-
-    # 1. Update Divisions sheet
-    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
-    if div_key and div_key in sheets_dict:
-        div_df = sheets_dict[div_key].copy()
-        team_col = find_col(div_df, ["team", "tantalus team", "teams", "teamnaam"], fallback_index=0)
-        div_col = find_col(div_df, ["division", "divisie", "klasse", "poule"], fallback_index=1 if len(div_df.columns) > 1 else 0)
-
-        matched = False
-        for idx_d, r_d in div_df.iterrows():
-            if clean_team_code(r_d.get(team_col)) == c_target:
-                div_df.at[idx_d, div_col] = new_div_str
-                matched = True
-
-        if not matched and team_col and div_col:
-            new_row_div = {c: "" for c in div_df.columns}
-            new_row_div[team_col] = team_name
-            new_row_div[div_col] = new_div_str
-            div_df = pd.concat([div_df, pd.DataFrame([new_row_div])], ignore_index=True)
-
-        sheets_dict[div_key] = div_df
-
-    # 2. Update SKP sheet
-    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
-    affected_match_indices = []
-    if skp_key and skp_key in sheets_dict:
-        skp_df = sheets_dict[skp_key].copy()
-        for idx_s, r_s in skp_df.iterrows():
-            h_team = str(r_s.get("Home Team", "")).strip()
-            if clean_team_code(h_team) == c_target:
-                skp_df.at[idx_s, "Division"] = new_div_str
-                affected_match_indices.append(idx_s)
-        sheets_dict[skp_key] = skp_df
-
-    # 3. Update All games sheet
-    all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
-    if all_games_key and all_games_key in sheets_dict:
-        all_games_df = sheets_dict[all_games_key].copy()
-        div_col_all = find_col(all_games_df, ["division", "divisie", "poule", "klasse"])
-        if not div_col_all:
-            all_games_df["Division"] = ""
-            div_col_all = "Division"
-
-        for idx_a, r_a in all_games_df.iterrows():
-            h_team = str(r_a.get("Home Team", "")).strip()
-            a_team = str(r_a.get("Away Team", "")).strip()
-            if clean_team_code(h_team) == c_target or clean_team_code(a_team) == c_target:
-                all_games_df.at[idx_a, div_col_all] = new_div_str
-        sheets_dict[all_games_key] = all_games_df
-
-    return sheets_dict, affected_match_indices
-
-
 def reassign_invalid_referees_after_division_change(sheets_dict, affected_indices):
     """
     Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
@@ -1308,7 +1321,7 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
                 })
 
-        # Bij promotie naar Div 1-3 is 24 sec operator juist vereist
+        # Bij promotie naar Div 1-3 is 24 sec operator vereist
         if div_num <= 3:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             if not curr_24s or curr_24s.lower() in ["nan", "none"]:
@@ -1325,7 +1338,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
             preserve_manual=True
         )
 
-        # Werk de logs bij met de nieuw toegewezen namen
         skp_df_updated = sheets_dict[skp_key]
         for log in change_logs:
             if log["new_person"] == "Wordt heringedeeld":
