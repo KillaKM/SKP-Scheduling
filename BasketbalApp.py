@@ -687,13 +687,6 @@ def handle_lock_all_synchronization(old_df, new_df):
 
 
 def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
-    """
-    Past de divisie van een team aan op:
-    1. Divisions sheet
-    2. SKP sheet
-    3. All games sheet
-    Voorkomt KeyError en TypeError/LossySetitemError door veilige kolomdetectie en .loc met object types.
-    """
     c_target = clean_team_code(team_name)
     new_div_str = f"Division {new_div_number}"
 
@@ -745,7 +738,7 @@ def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
                 affected_match_indices.append(idx_s)
         sheets_dict[skp_key] = skp_df
 
-    # 3. Update All games sheet (veilig met find_col en get om KeyError te voorkomen)
+    # 3. Update All games sheet
     all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
     if all_games_key and all_games_key in sheets_dict:
         all_games_df = sheets_dict[all_games_key].copy()
@@ -771,6 +764,8 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
     """
     Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
     waarvan de divisie is gewijzigd, en logt alle vervangingen.
+    Hef de blokkade op 'x' op zodat scheidsrechters worden toegewezen zodra een team (zoals MSE 1)
+    in een divisie speelt die verenigingsscheidsrechters vereist.
     """
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
@@ -820,7 +815,24 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
             is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
             curr_ref = str(skp_df.at[idx, ref_col]).strip() if ref_col in skp_df.columns else ""
 
-            if is_locked or not curr_ref or curr_ref.lower() in ["nan", "none", "x"]:
+            if is_locked:
+                continue
+
+            # Als er een 'x' stond, maar de nieuwe divisie vereist verenigingsarbiters:
+            if curr_ref.lower() == "x":
+                skp_df.at[idx, ref_col] = ""
+                indices_to_rerun.add(idx)
+                change_logs.append({
+                    "match": match_desc,
+                    "task": ref_col,
+                    "old_person": "x (Geen arbiter)",
+                    "new_person": "Wordt heringedeeld",
+                    "reason": f"Team speelt in Divisie {div_num}; verenigingsarbiter vereist"
+                })
+                continue
+
+            if not curr_ref or curr_ref.lower() in ["nan", "none"]:
+                indices_to_rerun.add(idx)
                 continue
 
             ref_dip = player_dips.get(curr_ref, "NONE")
@@ -999,10 +1011,9 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
             if is_manual_entry:
                 skp_df.at[idx, l_col] = True
             elif col_c in skp_df.columns and not is_locked:
-                if str(skp_df.at[idx, col_c]).strip().lower() != "x":
-                    skp_df.at[idx, col_c] = ""
-                    if (idx, col_c) in auto_assigned:
-                        auto_assigned.remove((idx, col_c))
+                skp_df.at[idx, col_c] = ""
+                if (idx, col_c) in auto_assigned:
+                    auto_assigned.remove((idx, col_c))
 
     busy_game_slots = build_team_busy_slots(all_games_df)
     ref_tasks_counter = {p: 0 for p in valid_players_dict}
@@ -1062,7 +1073,9 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         }
 
         h_code = clean_team_code(home_team)
-        is_tantalus_mse1 = bool(re.search(r"mse[\s\-]*1\b", h_code))
+        # Alleen als MSE 1 daadwerkelijk in Divisie 1 speelt, levert de bond arbiters ('x').
+        # In Divisie 2 of lager wijst de app verenigingsscheidsrechters toe.
+        is_mse1_div1 = bool(re.search(r"mse[\s\-]*1\b", h_code)) and (div_num <= 1)
 
         def is_physically_free(p_name):
             if (d_norm, t_norm) in player_busy_times[p_name]:
@@ -1075,7 +1088,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 return False
             return True
 
-        if is_tantalus_mse1:
+        if is_mse1_div1:
             for ref_col in ["Referee 1", "Referee 2"]:
                 l_col = LOCK_MAP[ref_col]
                 is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
@@ -1089,7 +1102,12 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     continue
 
                 curr_val = str(skp_df.at[idx, ref_col]).strip()
-                if curr_val.lower() == "x" or (curr_val and curr_val not in ["", "None", "nan"]):
+                # Als er nog een 'x' stond van een eerdere MSE 1 indeling, wis deze zodat de arbiter ingedeeld kan worden:
+                if curr_val.lower() == "x":
+                    curr_val = ""
+                    skp_df.at[idx, ref_col] = ""
+
+                if curr_val and curr_val not in ["", "None", "nan"]:
                     continue
 
                 other_ref_col = "Referee 2" if ref_col == "Referee 1" else "Referee 1"
@@ -1456,19 +1474,19 @@ def validate_schedule_rules(sheets_dict):
         t_norm = normalize_time_str(time_str)
         is_tantalus_home = "tantalus" in home.lower()
         h_code = clean_team_code(home)
-        is_tantalus_mse1 = bool(re.search(r"mse[\s\-]*1\b", h_code))
         div_num = determine_division_for_team(home, tantalus_div_map)
+        is_mse1_div1 = bool(re.search(r"mse[\s\-]*1\b", h_code)) and (div_num <= 1)
 
         match_label = f"Rij {idx + 1} ({date_str} {t_norm}: {home} vs {away})"
 
         refs_in_match = []
         for r_c in ["Referee 1", "Referee 2"]:
             val = str(row.get(r_c, "")).strip()
-            if is_tantalus_home and not is_tantalus_mse1:
+            if is_tantalus_home and not is_mse1_div1:
                 if not val or val.lower() in ["nan", "none", ""]:
                     violations.append(f"{match_label}: **{r_c}** is niet ingevuld.")
                 elif val.lower() == "x":
-                    violations.append(f"{match_label}: **{r_c}** staat op 'x' terwijl dit geen MSE 1 wedstrijd is.")
+                    violations.append(f"{match_label}: **{r_c}** staat nog op 'x' terwijl dit team in Divisie {div_num} verenigingsarbiters nodig heeft.")
             if val and val.lower() not in ["nan", "none", "x", ""]:
                 refs_in_match.append((r_c, val))
 
