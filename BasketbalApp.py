@@ -439,11 +439,16 @@ def sort_skp_schedule(df):
 def build_team_busy_slots(all_games_df):
     busy_slots = set()
     if all_games_df is not None and not all_games_df.empty:
+        col_home = find_col(all_games_df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+        col_away = find_col(all_games_df, ["away team", "uit team", "away", "uit"]) or "Away Team"
+        col_date = find_col(all_games_df, ["date", "datum"]) or "Date"
+        col_time = find_col(all_games_df, ["time", "tijd", "starttijd", "start time"]) or "Time"
+
         for _, row in all_games_df.iterrows():
-            d_val = normalize_date_str(row.get("Date"))
-            t_val = normalize_time_str(row.get("Time") or row.get("Starttijd"))
-            h_team = str(row.get("Home Team", "")).lower()
-            a_team = str(row.get("Away Team", "")).lower()
+            d_val = normalize_date_str(row.get(col_date))
+            t_val = normalize_time_str(row.get(col_time))
+            h_team = str(row.get(col_home, "")).lower()
+            a_team = str(row.get(col_away, "")).lower()
 
             if "tantalus" in h_team:
                 c_h = clean_team_code(h_team)
@@ -684,9 +689,10 @@ def handle_lock_all_synchronization(old_df, new_df):
 def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
     """
     Past de divisie van een team aan op:
-    1. Divisions sheet (voorkomt LossySetitemError/TypeError via .loc en .astype(object))
+    1. Divisions sheet
     2. SKP sheet
     3. All games sheet
+    Voorkomt KeyError en TypeError/LossySetitemError door veilige kolomdetectie en .loc met object types.
     """
     c_target = clean_team_code(team_name)
     new_div_str = f"Division {new_div_number}"
@@ -707,7 +713,8 @@ def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
 
             matched = False
             for idx_d in div_df.index:
-                if clean_team_code(div_df.at[idx_d, team_col]) == c_target:
+                team_val = div_df.at[idx_d, team_col] if team_col in div_df.columns else ""
+                if clean_team_code(team_val) == c_target:
                     div_df.loc[idx_d, div_col] = target_div_val
                     matched = True
 
@@ -724,36 +731,168 @@ def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
     affected_match_indices = []
     if skp_key and skp_key in sheets_dict:
         skp_df = sheets_dict[skp_key].copy()
-        if "Division" not in skp_df.columns:
-            skp_df["Division"] = ""
-        skp_df["Division"] = skp_df["Division"].astype(object)
+        col_home_skp = find_col(skp_df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+        col_div_skp = find_col(skp_df, ["division", "divisie", "klasse", "poule"]) or "Division"
+
+        if col_div_skp not in skp_df.columns:
+            skp_df[col_div_skp] = ""
+        skp_df[col_div_skp] = skp_df[col_div_skp].astype(object)
 
         for idx_s in skp_df.index:
-            h_team = str(skp_df.at[idx_s, "Home Team"]).strip()
+            h_team = str(skp_df.at[idx_s, col_home_skp]).strip() if col_home_skp in skp_df.columns else ""
             if clean_team_code(h_team) == c_target:
-                skp_df.loc[idx_s, "Division"] = new_div_str
+                skp_df.loc[idx_s, col_div_skp] = new_div_str
                 affected_match_indices.append(idx_s)
         sheets_dict[skp_key] = skp_df
 
-    # 3. Update All games sheet
+    # 3. Update All games sheet (veilig met find_col en get om KeyError te voorkomen)
     all_games_key = find_sheet(sheets_dict, ["All games", "all games", "ALL GAMES"])
     if all_games_key and all_games_key in sheets_dict:
         all_games_df = sheets_dict[all_games_key].copy()
-        div_col_all = find_col(all_games_df, ["division", "divisie", "poule", "klasse"])
-        if not div_col_all:
-            all_games_df["Division"] = ""
-            div_col_all = "Division"
+        col_home_all = find_col(all_games_df, ["home team", "thuis team", "home", "thuis"])
+        col_away_all = find_col(all_games_df, ["away team", "uit team", "away", "uit"])
+        div_col_all = find_col(all_games_df, ["division", "divisie", "poule", "klasse"]) or "Division"
 
+        if div_col_all not in all_games_df.columns:
+            all_games_df[div_col_all] = ""
         all_games_df[div_col_all] = all_games_df[div_col_all].astype(object)
 
         for idx_a in all_games_df.index:
-            h_team = str(all_games_df.at[idx_a, "Home Team"]).strip()
-            a_team = str(all_games_df.at[idx_a, "Away Team"]).strip()
+            h_team = str(all_games_df.at[idx_a, col_home_all]).strip() if col_home_all else ""
+            a_team = str(all_games_df.at[idx_a, col_away_all]).strip() if col_away_all else ""
             if clean_team_code(h_team) == c_target or clean_team_code(a_team) == c_target:
                 all_games_df.loc[idx_a, div_col_all] = new_div_str
         sheets_dict[all_games_key] = all_games_df
 
     return sheets_dict, affected_match_indices
+
+
+def reassign_invalid_referees_after_division_change(sheets_dict, affected_indices):
+    """
+    Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
+    waarvan de divisie is gewijzigd, en logt alle vervangingen.
+    """
+    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
+    players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
+    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
+
+    if not skp_key or not affected_indices:
+        return sheets_dict, []
+
+    skp_df = sheets_dict[skp_key].copy()
+    players_df = standardize_players_df(sheets_dict.get(players_key, pd.DataFrame()))
+    tantalus_div_map = build_division_map(sheets_dict.get(div_key, pd.DataFrame()))
+
+    player_dips = {}
+    for _, p_r in players_df.iterrows():
+        f = str(p_r.get("First name", "")).strip()
+        l = str(p_r.get("Last name", "")).strip()
+        if not l or l.lower() in ["nan", "none"]:
+            continue
+        full_n = f"{f} {l}".strip()
+        d_val = str(p_r.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
+        if "L4" in d_val: norm = "L4"
+        elif "L3" in d_val: norm = "L3"
+        elif "BS3" in d_val: norm = "BS3"
+        elif "BS2" in d_val: norm = "BS2"
+        elif "BS1" in d_val: norm = "BS1"
+        else: norm = "NONE"
+        player_dips[full_n] = norm
+
+    change_logs = []
+    indices_to_rerun = set()
+
+    col_home = find_col(skp_df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+    col_away = find_col(skp_df, ["away team", "uit team", "away", "uit"]) or "Away Team"
+    col_date = find_col(skp_df, ["date", "datum"]) or "Date"
+    col_time = find_col(skp_df, ["time", "tijd"]) or "Time"
+
+    for idx in affected_indices:
+        home_team = str(skp_df.at[idx, col_home]).strip() if col_home in skp_df.columns else ""
+        away_team = str(skp_df.at[idx, col_away]).strip() if col_away in skp_df.columns else ""
+        m_d = str(skp_df.at[idx, col_date]).strip() if col_date in skp_df.columns else ""
+        m_t = str(skp_df.at[idx, col_time]).strip() if col_time in skp_df.columns else ""
+        div_num = determine_division_for_team(home_team, tantalus_div_map)
+        match_desc = f"{m_d} {m_t} ({home_team} vs {away_team})"
+
+        for ref_col in ["Referee 1", "Referee 2"]:
+            l_col = LOCK_MAP[ref_col]
+            is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
+            curr_ref = str(skp_df.at[idx, ref_col]).strip() if ref_col in skp_df.columns else ""
+
+            if is_locked or not curr_ref or curr_ref.lower() in ["nan", "none", "x"]:
+                continue
+
+            ref_dip = player_dips.get(curr_ref, "NONE")
+            is_invalid = False
+            reason_str = ""
+
+            if div_num <= 1 and ref_dip not in ["L4", "L3", "BS3", "BS2", "BS1"]:
+                is_invalid = True
+                reason_str = f"heeft niveau '{ref_dip}' maar Divisie {div_num} vereist minimaal BS3/BS2"
+            elif div_num == 2 and ref_dip == "NONE":
+                is_invalid = True
+                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 2"
+            elif div_num == 3 and ref_dip == "NONE":
+                is_invalid = True
+                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 3"
+
+            if is_invalid:
+                skp_df.at[idx, ref_col] = ""
+                indices_to_rerun.add(idx)
+                change_logs.append({
+                    "match": match_desc,
+                    "task": ref_col,
+                    "old_person": curr_ref,
+                    "new_person": "Wordt heringedeeld",
+                    "reason": reason_str
+                })
+
+        # Bij degradatie naar Div 4+ vervalt de 24 sec operator
+        if div_num > 3 and "24 sec operator" in skp_df.columns:
+            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
+            l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
+            if curr_24s and curr_24s.lower() not in ["nan", "none", ""] and not l_24s:
+                skp_df.at[idx, "24 sec operator"] = ""
+                change_logs.append({
+                    "match": match_desc,
+                    "task": "24 sec operator",
+                    "old_person": curr_24s,
+                    "new_person": "Geen (taak vervalt)",
+                    "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
+                })
+
+        # Bij promotie naar Div 1-3 is 24 sec operator vereist
+        if div_num <= 3 and "24 sec operator" in skp_df.columns:
+            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
+            if not curr_24s or curr_24s.lower() in ["nan", "none"]:
+                indices_to_rerun.add(idx)
+
+    sheets_dict[skp_key] = skp_df
+
+    if indices_to_rerun:
+        current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
+        sheets_dict, _ = run_assignment_core(
+            sheets_dict,
+            list(indices_to_rerun),
+            max_daily_tasks=current_max_tasks,
+            preserve_manual=True
+        )
+
+        skp_df_updated = sheets_dict[skp_key]
+        for log in change_logs:
+            if log["new_person"] == "Wordt heringedeeld":
+                for idx_m in indices_to_rerun:
+                    h_m = str(skp_df_updated.at[idx_m, col_home]).strip() if col_home in skp_df_updated.columns else ""
+                    a_m = str(skp_df_updated.at[idx_m, col_away]).strip() if col_away in skp_df_updated.columns else ""
+                    d_m = str(skp_df_updated.at[idx_m, col_date]).strip() if col_date in skp_df_updated.columns else ""
+                    t_m = str(skp_df_updated.at[idx_m, col_time]).strip() if col_time in skp_df_updated.columns else ""
+                    m_str = f"{d_m} {t_m} ({h_m} vs {a_m})"
+                    if m_str == log["match"]:
+                        assigned_now = str(skp_df_updated.at[idx_m, log["task"]]).strip() if log["task"] in skp_df_updated.columns else ""
+                        log["new_person"] = assigned_now if assigned_now else "Openstaand (geen geldige arbiter beschikbaar)"
+
+    return sheets_dict, change_logs
 
 
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
@@ -1233,125 +1372,6 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
     return sheets_dict, []
 
 
-def reassign_invalid_referees_after_division_change(sheets_dict, affected_indices):
-    """
-    Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
-    waarvan de divisie is gewijzigd, en logt alle vervangingen.
-    """
-    skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
-    players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
-    div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
-
-    if not skp_key or not affected_indices:
-        return sheets_dict, []
-
-    skp_df = sheets_dict[skp_key].copy()
-    players_df = standardize_players_df(sheets_dict.get(players_key, pd.DataFrame()))
-    tantalus_div_map = build_division_map(sheets_dict.get(div_key, pd.DataFrame()))
-
-    player_dips = {}
-    for _, p_r in players_df.iterrows():
-        f = str(p_r.get("First name", "")).strip()
-        l = str(p_r.get("Last name", "")).strip()
-        if not l or l.lower() in ["nan", "none"]:
-            continue
-        full_n = f"{f} {l}".strip()
-        d_val = str(p_r.get("Diploma", "")).strip().upper().replace(" ", "").replace("-", "")
-        if "L4" in d_val: norm = "L4"
-        elif "L3" in d_val: norm = "L3"
-        elif "BS3" in d_val: norm = "BS3"
-        elif "BS2" in d_val: norm = "BS2"
-        elif "BS1" in d_val: norm = "BS1"
-        else: norm = "NONE"
-        player_dips[full_n] = norm
-
-    change_logs = []
-    indices_to_rerun = set()
-
-    for idx in affected_indices:
-        home_team = str(skp_df.at[idx, "Home Team"]).strip()
-        away_team = str(skp_df.at[idx, "Away Team"]).strip()
-        div_num = determine_division_for_team(home_team, tantalus_div_map)
-        match_desc = f"{skp_df.at[idx, 'Date']} {skp_df.at[idx, 'Time']} ({home_team} vs {away_team})"
-
-        for ref_col in ["Referee 1", "Referee 2"]:
-            l_col = LOCK_MAP[ref_col]
-            is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
-            curr_ref = str(skp_df.at[idx, ref_col]).strip()
-
-            if is_locked or not curr_ref or curr_ref.lower() in ["nan", "none", "x"]:
-                continue
-
-            ref_dip = player_dips.get(curr_ref, "NONE")
-            is_invalid = False
-            reason_str = ""
-
-            if div_num <= 1 and ref_dip not in ["L4", "L3", "BS3", "BS2", "BS1"]:
-                is_invalid = True
-                reason_str = f"heeft niveau '{ref_dip}' maar Divisie {div_num} vereist minimaal BS3/BS2"
-            elif div_num == 2 and ref_dip == "NONE":
-                is_invalid = True
-                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 2"
-            elif div_num == 3 and ref_dip == "NONE":
-                is_invalid = True
-                reason_str = f"heeft geen scheidsrechtersdiploma voor Divisie 3"
-
-            if is_invalid:
-                skp_df.at[idx, ref_col] = ""
-                indices_to_rerun.add(idx)
-                change_logs.append({
-                    "match": match_desc,
-                    "task": ref_col,
-                    "old_person": curr_ref,
-                    "new_person": "Wordt heringedeeld",
-                    "reason": reason_str
-                })
-
-        # Bij degradatie naar Div 4+ vervalt de 24 sec operator
-        if div_num > 3:
-            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
-            l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
-            if curr_24s and curr_24s.lower() not in ["nan", "none", ""] and not l_24s:
-                skp_df.at[idx, "24 sec operator"] = ""
-                change_logs.append({
-                    "match": match_desc,
-                    "task": "24 sec operator",
-                    "old_person": curr_24s,
-                    "new_person": "Geen (taak vervalt)",
-                    "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
-                })
-
-        # Bij promotie naar Div 1-3 is 24 sec operator vereist
-        if div_num <= 3:
-            curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
-            if not curr_24s or curr_24s.lower() in ["nan", "none"]:
-                indices_to_rerun.add(idx)
-
-    sheets_dict[skp_key] = skp_df
-
-    if indices_to_rerun:
-        current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
-        sheets_dict, _ = run_assignment_core(
-            sheets_dict,
-            list(indices_to_rerun),
-            max_daily_tasks=current_max_tasks,
-            preserve_manual=True
-        )
-
-        skp_df_updated = sheets_dict[skp_key]
-        for log in change_logs:
-            if log["new_person"] == "Wordt heringedeeld":
-                for idx_m in indices_to_rerun:
-                    h_m = str(skp_df_updated.at[idx_m, "Home Team"]).strip()
-                    a_m = str(skp_df_updated.at[idx_m, "Away Team"]).strip()
-                    m_str = f"{skp_df_updated.at[idx_m, 'Date']} {skp_df_updated.at[idx_m, 'Time']} ({h_m} vs {a_m})"
-                    if m_str == log["match"]:
-                        assigned_now = str(skp_df_updated.at[idx_m, log["task"]]).strip()
-                        log["new_person"] = assigned_now if assigned_now else "Openstaand (geen geldige arbiter beschikbaar)"
-
-    return sheets_dict, change_logs
-
-
 def validate_schedule_rules(sheets_dict):
     """Controleert of het rooster aan alle regels voldoet."""
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
@@ -1422,11 +1442,16 @@ def validate_schedule_rules(sheets_dict):
     violations = []
     slot_assignments = {}
 
+    col_home = find_col(skp_df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+    col_away = find_col(skp_df, ["away team", "uit team", "away", "uit"]) or "Away Team"
+    col_date = find_col(skp_df, ["date", "datum"]) or "Date"
+    col_time = find_col(skp_df, ["time", "tijd"]) or "Time"
+
     for idx, row in skp_df.iterrows():
-        home = str(row.get("Home Team", "")).strip()
-        away = str(row.get("Away Team", "")).strip()
-        date_str = str(row.get("Date", "")).strip()
-        time_str = str(row.get("Time", "")).strip()
+        home = str(row.get(col_home, "")).strip()
+        away = str(row.get(col_away, "")).strip()
+        date_str = str(row.get(col_date, "")).strip()
+        time_str = str(row.get(col_time, "")).strip()
         d_norm = normalize_date_str(date_str)
         t_norm = normalize_time_str(time_str)
         is_tantalus_home = "tantalus" in home.lower()
@@ -1975,12 +2000,17 @@ if "sheets" in st.session_state:
             # 3.2 WEDSTRIJD VERWIJDEREN
             with st.expander("🗑️ Wedstrijd Verwijderen", expanded=False):
                 game_choices = []
+                col_home_g = find_col(skp_df_games, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+                col_away_g = find_col(skp_df_games, ["away team", "uit team", "away", "uit"]) or "Away Team"
+                col_date_g = find_col(skp_df_games, ["date", "datum"]) or "Date"
+                col_time_g = find_col(skp_df_games, ["time", "tijd"]) or "Time"
+
                 for idx_g, row_g in skp_df_games.iterrows():
-                    d_show = str(row_g.get("Date", ""))
-                    t_show = str(row_g.get("Time", ""))
+                    d_show = str(row_g.get(col_date_g, ""))
+                    t_show = str(row_g.get(col_time_g, ""))
                     c_show = str(row_g.get(court_col, ""))
-                    h_show = str(row_g.get("Home Team", ""))
-                    a_show = str(row_g.get("Away Team", ""))
+                    h_show = str(row_g.get(col_home_g, ""))
+                    a_show = str(row_g.get(col_away_g, ""))
                     court_str = f" [{c_show}]" if c_show and c_show != "nan" else ""
                     game_choices.append((idx_g, f"{d_show} {t_show}{court_str} - {h_show} vs {a_show}"))
 
