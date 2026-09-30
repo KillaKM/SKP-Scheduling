@@ -404,8 +404,11 @@ def standardize_skp_df(df, div_map=None):
         div_vals = []
         for _, r in df.iterrows():
             h_team = str(r.get("Home Team", ""))
-            d_num = determine_division_for_team(h_team, div_map)
-            div_vals.append(f"Division {d_num}")
+            if h_team and h_team not in ["nan", "None", ""]:
+                d_num = determine_division_for_team(h_team, div_map)
+                div_vals.append(f"Division {d_num}")
+            else:
+                div_vals.append("")
         df["Division"] = div_vals
     elif "Division" not in df.columns:
         df["Division"] = "Division 5"
@@ -415,13 +418,69 @@ def standardize_skp_df(df, div_map=None):
     return df
 
 
+def ensure_day_spacing_in_skp(df):
+    """
+    Zorgt ervoor dat tussen opeenvolgende wedstrijden op verschillende dagen
+    precies één lege witregel staat, om de layout intact te houden.
+    """
+    if df is None or df.empty:
+        return df
+
+    col_date = find_col(df, ["date", "datum"]) or "Date"
+    col_home = find_col(df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+
+    # Verwijder eerst eventuele bestaande lege witregels om dubbele witregels te voorkomen
+    valid_rows = []
+    for _, row in df.iterrows():
+        d_val = str(row.get(col_date, "")).strip()
+        h_val = str(row.get(col_home, "")).strip()
+        if (d_val and d_val not in ["nan", "None"]) or (h_val and h_val not in ["nan", "None"]):
+            valid_rows.append(row.to_dict())
+
+    if not valid_rows:
+        return df
+
+    spaced_rows = []
+    prev_date_norm = None
+
+    for r_dict in valid_rows:
+        curr_d_norm = normalize_date_str(r_dict.get(col_date))
+        if prev_date_norm is not None and curr_d_norm and curr_d_norm != prev_date_norm:
+            # Voeg een lege regel in tussen twee verschillende dagen
+            empty_row = {c: "" for c in df.columns}
+            for l_c in ALL_LOCK_COLS:
+                if l_c in empty_row:
+                    empty_row[l_c] = False
+            spaced_rows.append(empty_row)
+
+        spaced_rows.append(r_dict)
+        if curr_d_norm:
+            prev_date_norm = curr_d_norm
+
+    res_df = pd.DataFrame(spaced_rows)
+    return ensure_lock_columns(res_df)
+
+
 def sort_skp_schedule(df):
-    """Sorteert het rooster strikt chronologisch op datum en tijd."""
-    df_sorted = df.copy()
+    """Sorteert het rooster strikt chronologisch op datum en tijd en plaatst daarna witregels tussen speeldagen."""
+    if df is None or df.empty:
+        return df
+
+    col_date = find_col(df, ["date", "datum"]) or "Date"
+    col_home = find_col(df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
+    col_time = find_col(df, ["time", "tijd"]) or "Time"
+
+    # Filter lege witregels eruit vóór het sorteren
+    df_clean = df.copy()
+    mask_real_match = df_clean.apply(
+        lambda r: bool(str(r.get(col_date, "")).strip() not in ["", "nan", "None"] or str(r.get(col_home, "")).strip() not in ["", "nan", "None"]),
+        axis=1
+    )
+    df_sorted = df_clean[mask_real_match].copy()
 
     def get_sort_datetime(row):
-        d_obj = parse_date_obj(row.get("Date"))
-        t_str = normalize_time_str(row.get("Time"))
+        d_obj = parse_date_obj(row.get(col_date))
+        t_str = normalize_time_str(row.get(col_time))
         if not d_obj:
             return datetime(2099, 1, 1, 0, 0)
         try:
@@ -433,7 +492,9 @@ def sort_skp_schedule(df):
     sort_keys = df_sorted.apply(get_sort_datetime, axis=1)
     df_sorted["_sort_key"] = sort_keys
     df_sorted = df_sorted.sort_values(by="_sort_key").drop(columns=["_sort_key"]).reset_index(drop=True)
-    return df_sorted
+    
+    # Voeg witregels tussen de speeldagen toe
+    return ensure_day_spacing_in_skp(df_sorted)
 
 
 def build_team_busy_slots(all_games_df):
@@ -764,8 +825,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
     """
     Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
     waarvan de divisie is gewijzigd, en logt alle vervangingen.
-    Hef de blokkade op 'x' op zodat scheidsrechters worden toegewezen zodra een team (zoals MSE 1)
-    in een divisie speelt die verenigingsscheidsrechters vereist.
     """
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
@@ -818,7 +877,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
             if is_locked:
                 continue
 
-            # Als er een 'x' stond, maar de nieuwe divisie vereist verenigingsarbiters:
             if curr_ref.lower() == "x":
                 skp_df.at[idx, ref_col] = ""
                 indices_to_rerun.add(idx)
@@ -860,7 +918,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": reason_str
                 })
 
-        # Bij degradatie naar Div 4+ vervalt de 24 sec operator
         if div_num > 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
@@ -874,7 +931,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
                 })
 
-        # Bij promotie naar Div 1-3 is 24 sec operator vereist
         if div_num <= 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             if not curr_24s or curr_24s.lower() in ["nan", "none"]:
@@ -1002,6 +1058,8 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     auto_assigned = st.session_state.get("auto_assigned_cells", set())
 
     for idx in target_match_indices:
+        if idx not in skp_df.index:
+            continue
         for col_c in TASK_COLS:
             l_col = LOCK_MAP[col_c]
             is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
@@ -1028,6 +1086,8 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     for idx_row in skp_df.index:
         d_val = normalize_date_str(skp_df.at[idx_row, "Date"])
         t_val = normalize_time_str(skp_df.at[idx_row, "Time"])
+        if not d_val:
+            continue
         for col in ["Referee 1", "Referee 2"]:
             name = str(skp_df.at[idx_row, col]).strip()
             if name in valid_players_dict:
@@ -1043,18 +1103,25 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 player_day_counts[name][d_val] = player_day_counts[name].get(d_val, 0) + 1
 
     def match_sort_key(idx_val):
+        if idx_val not in skp_df.index:
+            return ("", 99, "")
         d_str = normalize_date_str(skp_df.at[idx_val, "Date"])
         t_str = normalize_time_str(skp_df.at[idx_val, "Time"])
         h_t = str(skp_df.at[idx_val, "Home Team"]).strip()
         div_n = determine_division_for_team(h_t, tantalus_div_map)
         return (d_str, div_n, t_str)
 
-    sorted_match_indices = sorted(target_match_indices, key=match_sort_key)
+    valid_target_indices = [i for i in target_match_indices if i in skp_df.index]
+    sorted_match_indices = sorted(valid_target_indices, key=match_sort_key)
     assignment_warnings = []
 
     for idx in sorted_match_indices:
         home_team = str(skp_df.at[idx, "Home Team"]).strip()
         away_team = str(skp_df.at[idx, "Away Team"]).strip()
+
+        # Negeer witregels
+        if not home_team or home_team in ["nan", "None"]:
+            continue
 
         if "tantalus" not in home_team.lower():
             continue
@@ -1073,8 +1140,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         }
 
         h_code = clean_team_code(home_team)
-        # Alleen als MSE 1 daadwerkelijk in Divisie 1 speelt, levert de bond arbiters ('x').
-        # In Divisie 2 of lager wijst de app verenigingsscheidsrechters toe.
         is_mse1_div1 = bool(re.search(r"mse[\s\-]*1\b", h_code)) and (div_num <= 1)
 
         def is_physically_free(p_name):
@@ -1102,7 +1167,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     continue
 
                 curr_val = str(skp_df.at[idx, ref_col]).strip()
-                # Als er nog een 'x' stond van een eerdere MSE 1 indeling, wis deze zodat de arbiter ingedeeld kan worden:
                 if curr_val.lower() == "x":
                     curr_val = ""
                     skp_df.at[idx, ref_col] = ""
@@ -1364,6 +1428,9 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         all_on = all(bool(skp_df.at[i, l_c]) for l_c in LOCK_COLS if l_c in skp_df.columns)
         skp_df.at[i, LOCK_ALL_COL] = all_on
 
+    # Garandeer behoud van witregels tussen de dagen
+    skp_df = ensure_day_spacing_in_skp(skp_df)
+
     st.session_state["auto_assigned_cells"] = auto_assigned
     sheets_dict[skp_key] = make_arrow_compatible(skp_df)
     sheets_dict = update_player_stats(sheets_dict)
@@ -1470,6 +1537,11 @@ def validate_schedule_rules(sheets_dict):
         away = str(row.get(col_away, "")).strip()
         date_str = str(row.get(col_date, "")).strip()
         time_str = str(row.get(col_time, "")).strip()
+
+        # Witregels overslaan
+        if not home or home in ["nan", "None"] or not date_str or date_str in ["nan", "None"]:
+            continue
+
         d_norm = normalize_date_str(date_str)
         t_norm = normalize_time_str(time_str)
         is_tantalus_home = "tantalus" in home.lower()
@@ -2029,6 +2101,8 @@ if "sheets" in st.session_state:
                     c_show = str(row_g.get(court_col, ""))
                     h_show = str(row_g.get(col_home_g, ""))
                     a_show = str(row_g.get(col_away_g, ""))
+                    if not h_show or h_show in ["nan", "None"]:
+                        continue
                     court_str = f" [{c_show}]" if c_show and c_show != "nan" else ""
                     game_choices.append((idx_g, f"{d_show} {t_show}{court_str} - {h_show} vs {a_show}"))
 
@@ -2042,6 +2116,7 @@ if "sheets" in st.session_state:
 
                     if st.button("🗑️ Verwijder deze wedstrijd", key="btn_confirm_del_game"):
                         skp_df_games = skp_df_games.drop(index=sel_game_del).reset_index(drop=True)
+                        skp_df_games = ensure_day_spacing_in_skp(skp_df_games)
                         sheets[skp_key] = make_arrow_compatible(skp_df_games)
                         sheets = update_player_stats(sheets)
                         st.success("Wedstrijd succesvol verwijderd en taken bijgewerkt!")
@@ -2101,6 +2176,7 @@ if "sheets" in st.session_state:
                         f"Rij {idx_r + 1}: {r.get('Date', '')} ({r.get('Time', '')}) - {r.get('Home Team', '')} vs {r.get('Away Team', '')}",
                     )
                     for idx_r, r in skp_df_ctrl.iterrows()
+                    if str(r.get("Home Team", "")).strip() not in ["", "nan", "None"]
                 ]
                 if row_choices_assign:
                     sel_row_idx = st.selectbox(
@@ -2182,7 +2258,7 @@ if "sheets" in st.session_state:
 
             elif clear_mode == "Indeling wissen per dag":
                 if "Date" in skp_df_clear.columns:
-                    clear_dates_list = list(skp_df_clear["Date"].dropna().unique())
+                    clear_dates_list = [d for d in skp_df_clear["Date"].dropna().unique() if str(d).strip() not in ["", "nan", "None"]]
                     selected_clear_date = st.selectbox(
                         "Selecteer dag:", clear_dates_list, key="sel_clear_date_box"
                     )
@@ -2214,6 +2290,7 @@ if "sheets" in st.session_state:
                         f"Rij {idx_r + 1}: {r.get('Date', '')} ({r.get('Time', '')}) - {r.get('Home Team', '')} vs {r.get('Away Team', '')}",
                     )
                     for idx_r, r in skp_df_clear.iterrows()
+                    if str(r.get("Home Team", "")).strip() not in ["", "nan", "None"]
                 ]
                 if row_choices_clear:
                     sel_row_to_clear = st.selectbox(
@@ -2276,7 +2353,7 @@ if "sheets" in st.session_state:
                     break
 
             if header_row_idx is not None:
-                max_r = max(ws.max_row, header_row_idx + len(clean_df) + 10)
+                max_r = max(ws.max_row, header_row_idx + len(clean_df) + 15)
                 for r in range(header_row_idx + 1, max_r + 1):
                     for c in col_name_to_col_idx.values():
                         cell = ws.cell(row=r, column=c)
