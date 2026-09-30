@@ -419,17 +419,13 @@ def standardize_skp_df(df, div_map=None):
 
 
 def ensure_day_spacing_in_skp(df):
-    """
-    Zorgt ervoor dat tussen opeenvolgende wedstrijden op verschillende dagen
-    precies één lege witregel staat, om de layout intact te houden.
-    """
+    """Zorgt ervoor dat tussen opeenvolgende wedstrijden op verschillende dagen precies één lege witregel staat."""
     if df is None or df.empty:
         return df
 
     col_date = find_col(df, ["date", "datum"]) or "Date"
     col_home = find_col(df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
 
-    # Verwijder eerst eventuele bestaande lege witregels om dubbele witregels te voorkomen
     valid_rows = []
     for _, row in df.iterrows():
         d_val = str(row.get(col_date, "")).strip()
@@ -446,7 +442,6 @@ def ensure_day_spacing_in_skp(df):
     for r_dict in valid_rows:
         curr_d_norm = normalize_date_str(r_dict.get(col_date))
         if prev_date_norm is not None and curr_d_norm and curr_d_norm != prev_date_norm:
-            # Voeg een lege regel in tussen twee verschillende dagen
             empty_row = {c: "" for c in df.columns}
             for l_c in ALL_LOCK_COLS:
                 if l_c in empty_row:
@@ -470,7 +465,6 @@ def sort_skp_schedule(df):
     col_home = find_col(df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
     col_time = find_col(df, ["time", "tijd"]) or "Time"
 
-    # Filter lege witregels eruit vóór het sorteren
     df_clean = df.copy()
     mask_real_match = df_clean.apply(
         lambda r: bool(str(r.get(col_date, "")).strip() not in ["", "nan", "None"] or str(r.get(col_home, "")).strip() not in ["", "nan", "None"]),
@@ -492,8 +486,7 @@ def sort_skp_schedule(df):
     sort_keys = df_sorted.apply(get_sort_datetime, axis=1)
     df_sorted["_sort_key"] = sort_keys
     df_sorted = df_sorted.sort_values(by="_sort_key").drop(columns=["_sort_key"]).reset_index(drop=True)
-    
-    # Voeg witregels tussen de speeldagen toe
+
     return ensure_day_spacing_in_skp(df_sorted)
 
 
@@ -581,12 +574,12 @@ def update_player_stats(sheets_dict):
     for _, row in skp_df.iterrows():
         for ref_col in ["Referee 1", "Referee 2"]:
             val = str(row.get(ref_col, "")).strip()
-            if val and val not in ["nan", "None", "x", ""]:
+            if val and val not in ["nan", "None", "x", "X", ""]:
                 ref_counts[val] = ref_counts.get(val, 0) + 1
 
         for col in ["Scorer", "Timer", "24 sec operator"]:
             val = str(row.get(col, "")).strip()
-            if val and val not in ["nan", "None", "x", ""]:
+            if val and val not in ["nan", "None", "x", "X", ""]:
                 table_counts[val] = table_counts.get(val, 0) + 1
 
     for idx, row in players_df.iterrows():
@@ -825,6 +818,7 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
     """
     Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
     waarvan de divisie is gewijzigd, en logt alle vervangingen.
+    Plaatst automatisch een 'x' voor 24 sec operator als de nieuwe divisie > 3 is.
     """
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
@@ -918,22 +912,27 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": reason_str
                 })
 
+        # Bij degradatie naar Div 4+ vervalt de 24 sec operator -> automatisch 'x' plaatsen
         if div_num > 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
-            if curr_24s and curr_24s.lower() not in ["nan", "none", ""] and not l_24s:
-                skp_df.at[idx, "24 sec operator"] = ""
+            if curr_24s.lower() != "x" and not l_24s:
+                skp_df.at[idx, "24 sec operator"] = "x"
                 change_logs.append({
                     "match": match_desc,
                     "task": "24 sec operator",
-                    "old_person": curr_24s,
-                    "new_person": "Geen (taak vervalt)",
+                    "old_person": curr_24s if curr_24s else "(leeg)",
+                    "new_person": "x (niet nodig)",
                     "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
                 })
 
+        # Bij promotie naar Div 1-3 is 24 sec operator vereist (wis eventuele 'x' en herindel)
         if div_num <= 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
-            if not curr_24s or curr_24s.lower() in ["nan", "none"]:
+            if curr_24s.lower() == "x":
+                skp_df.at[idx, "24 sec operator"] = ""
+                indices_to_rerun.add(idx)
+            elif not curr_24s or curr_24s.lower() in ["nan", "none"]:
                 indices_to_rerun.add(idx)
 
     sheets_dict[skp_key] = skp_df
@@ -1064,7 +1063,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
             l_col = LOCK_MAP[col_c]
             is_locked = bool(skp_df.at[idx, l_col]) if l_col in skp_df.columns else False
             curr_v = str(skp_df.at[idx, col_c]).strip()
-            is_manual_entry = (preserve_manual and curr_v not in ["", "nan", "None", "x"] and (idx, col_c) not in auto_assigned)
+            is_manual_entry = (preserve_manual and curr_v not in ["", "nan", "None", "x", "X"] and (idx, col_c) not in auto_assigned)
 
             if is_manual_entry:
                 skp_df.at[idx, l_col] = True
@@ -1119,7 +1118,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         home_team = str(skp_df.at[idx, "Home Team"]).strip()
         away_team = str(skp_df.at[idx, "Away Team"]).strip()
 
-        # Negeer witregels
         if not home_team or home_team in ["nan", "None"]:
             continue
 
@@ -1136,7 +1134,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         assigned_in_match = {
             str(skp_df.at[idx, c]).strip()
             for c in TASK_COLS
-            if str(skp_df.at[idx, c]).strip() not in ["", "nan", "None", "x"]
+            if str(skp_df.at[idx, c]).strip() not in ["", "nan", "None", "x", "X"]
         }
 
         h_code = clean_team_code(home_team)
@@ -1358,8 +1356,12 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                         "reasons": reasons[:6]
                     })
 
+        # --- TAFELTAKEN & 24 SEC OPERATOR ---
+        # Als de divisie > 3 is, is de 24 sec operator NIET nodig -> plaats automatisch een 'x'
         if div_num > 3:
-            skp_df.at[idx, "24 sec operator"] = ""
+            l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
+            if not l_24s:
+                skp_df.at[idx, "24 sec operator"] = "x"
 
         table_tasks_needed = ["Scorer", "Timer"]
         if div_num <= 3:
@@ -1372,6 +1374,11 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 continue
 
             curr_val = str(skp_df.at[idx, col]).strip()
+            # Als er in Divisie 1-3 nog een 'x' stond op 24s, maak deze leeg om in te delen
+            if col == "24 sec operator" and curr_val.lower() == "x":
+                curr_val = ""
+                skp_df.at[idx, col] = ""
+
             if curr_val and curr_val not in ["", "None", "nan"]:
                 continue
 
@@ -1428,7 +1435,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
         all_on = all(bool(skp_df.at[i, l_c]) for l_c in LOCK_COLS if l_c in skp_df.columns)
         skp_df.at[i, LOCK_ALL_COL] = all_on
 
-    # Garandeer behoud van witregels tussen de dagen
     skp_df = ensure_day_spacing_in_skp(skp_df)
 
     st.session_state["auto_assigned_cells"] = auto_assigned
@@ -1538,7 +1544,6 @@ def validate_schedule_rules(sheets_dict):
         date_str = str(row.get(col_date, "")).strip()
         time_str = str(row.get(col_time, "")).strip()
 
-        # Witregels overslaan
         if not home or home in ["nan", "None"] or not date_str or date_str in ["nan", "None"]:
             continue
 
@@ -2065,7 +2070,7 @@ if "sheets" in st.session_state:
                                 "Referee 2": "",
                                 "Scorer": "",
                                 "Timer": "",
-                                "24 sec operator": "",
+                                "24 sec operator": "x" if d_num > 3 else "",
                                 LOCK_ALL_COL: False,
                                 "Lock Ref 1": False,
                                 "Lock Ref 2": False,
