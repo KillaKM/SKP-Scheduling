@@ -17,6 +17,25 @@ st.set_page_config(
     page_title="SKP Schedule & Task Automation", layout="wide"
 )
 
+# --- MAXIMALE SCHERMRUIMTE (CSS INJECTIE) ---
+st.markdown(
+    """
+    <style>
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 1rem;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            max-width: 100% !important;
+        }
+        div[data-testid="stDataEditor"] {
+            width: 100% !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --- WACHTWOORDBEVEILIGING ---
 def check_password():
     def password_entered():
@@ -1916,10 +1935,12 @@ if "sheets" in st.session_state:
                 default=False,
             )
 
+    # Breedte op stretch en hoogte op 850px voor maximale schermweergave
     edited_df = st.data_editor(
         display_df,
         num_rows="dynamic",
         width="stretch",
+        height=850,
         key=f"editor_{selected_tab}",
         column_config=column_config,
     )
