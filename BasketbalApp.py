@@ -1,8 +1,13 @@
 import copy
 from datetime import datetime, timedelta, time
 import io
+import json
+import os
 import random
 import re
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from google.oauth2 import service_account
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 import pandas as pd
@@ -50,15 +55,12 @@ if not check_password():
 
 st.title("🏀 SKP Taakindeling & Scheidsrechters Systeem")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload je Excel-bestand", type=["xlsx"], key="main_file_uploader"
-)
-
 LOCK_ALL_COL = "Lock All"
 LOCK_COLS = ["Lock Ref 1", "Lock Ref 2", "Lock Scorer", "Lock Timer", "Lock 24s"]
 ALL_LOCK_COLS = [LOCK_ALL_COL] + LOCK_COLS
 TASK_COLS = ["Referee 1", "Referee 2", "Scorer", "Timer", "24 sec operator"]
 LOCK_MAP = dict(zip(TASK_COLS, LOCK_COLS))
+DRIVE_FILENAME = "SKP_Live_Database.xlsx"
 
 DUTCH_DAYS = {
     0: "ma",
@@ -71,6 +73,173 @@ DUTCH_DAYS = {
 }
 
 
+# =========================================================================
+# GOOGLE DRIVE FUNCTIES & OPSLAG
+# =========================================================================
+def get_drive_service():
+    if "gcp_service_account" not in st.secrets:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        st.sidebar.error(f"Fout bij opzetten Google Drive sessie: {e}")
+        return None
+
+
+def get_drive_folder_id():
+    fid = st.secrets.get("gdrive", {}).get("folder_id", "")
+    if fid in ["", "HIER_JE_FOLDER_ID_PLAKKEN", "1aBcD_EfGhIjKlMnOpQrStUvWxYz12345"]:
+        return None
+    return fid
+
+
+def load_file_from_gdrive():
+    service = get_drive_service()
+    folder_id = get_drive_folder_id()
+    if not service or not folder_id:
+        return None
+
+    try:
+        query = f"'{folder_id}' in parents and name = '{DRIVE_FILENAME}' and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        files = results.get("files", [])
+        if not files:
+            return None
+
+        file_id = files[0]["id"]
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return fh.getvalue()
+    except Exception as e:
+        st.sidebar.warning(f"Laden van Google Drive mislukt: {e}")
+        return None
+
+
+def upload_file_to_gdrive(file_bytes):
+    service = get_drive_service()
+    folder_id = get_drive_folder_id()
+    if not service or not folder_id:
+        return
+
+    try:
+        query = f"'{folder_id}' in parents and name = '{DRIVE_FILENAME}' and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        files = results.get("files", [])
+
+        if not files:
+            st.sidebar.error(
+                f"⚠️ '{DRIVE_FILENAME}' niet gevonden in de Drive map! Upload eenmalig handmatig je Excel-bestand als '{DRIVE_FILENAME}' in die map."
+            )
+            return
+
+        file_id = files[0]["id"]
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_bytes),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=True
+        )
+
+        service.files().update(
+            fileId=file_id,
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+    except Exception as e:
+        st.sidebar.warning(f"Live opslaan naar Google Drive mislukt: {e}")
+
+
+def save_persistent_state(sheets_dict):
+    """Schrijft de actuele dataframes terug naar Excel-bytes en uploadt live naar Google Drive."""
+    if "file_bytes" not in st.session_state or not st.session_state["file_bytes"]:
+        return
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(st.session_state["file_bytes"]))
+
+        for sheet_name, df in sheets_dict.items():
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                clean_df = df.copy()
+
+                for col_l in ALL_LOCK_COLS:
+                    if col_l in clean_df.columns:
+                        clean_df = clean_df.drop(columns=[col_l])
+
+                header_row_idx = None
+                col_name_to_col_idx = {}
+                for r in range(1, min(15, ws.max_row + 1)):
+                    row_vals = [
+                        str(ws.cell(row=r, column=c).value or "").strip().lower()
+                        for c in range(1, ws.max_column + 1)
+                    ]
+                    if any(
+                        x in row_vals
+                        for x in ["referee 1", "scorer", "first name", "home team", "date"]
+                    ):
+                        header_row_idx = r
+                        for c in range(1, ws.max_column + 1):
+                            val_str = str(ws.cell(row=r, column=c).value or "").strip()
+                            if val_str:
+                                col_name_to_col_idx[val_str.lower()] = c
+                        break
+
+                if header_row_idx is not None:
+                    max_r = max(ws.max_row, header_row_idx + len(clean_df) + 15)
+                    for r in range(header_row_idx + 1, max_r + 1):
+                        for c in col_name_to_col_idx.values():
+                            cell = ws.cell(row=r, column=c)
+                            if not isinstance(cell, MergedCell):
+                                cell.value = None
+
+                    for df_col in clean_df.columns:
+                        col_key = str(df_col).strip().lower()
+                        if col_key in col_name_to_col_idx:
+                            c_idx = col_name_to_col_idx[col_key]
+                            for row_offset, val in enumerate(clean_df[df_col]):
+                                target_row = header_row_idx + 1 + row_offset
+                                cell = ws.cell(row=target_row, column=c_idx)
+                                if not isinstance(cell, MergedCell):
+                                    cell.value = (
+                                        None
+                                        if (
+                                            pd.isna(val)
+                                            or val == ""
+                                            or str(val).lower() == "nan"
+                                        )
+                                        else val
+                                    )
+
+        output_buf = io.BytesIO()
+        wb.save(output_buf)
+        new_bytes = output_buf.getvalue()
+
+        st.session_state["file_bytes"] = new_bytes
+        upload_file_to_gdrive(new_bytes)
+    except Exception as e:
+        st.sidebar.warning(f"Opslaan van status mislukt: {e}")
+
+
+# =========================================================================
+# HELPER FUNCTIES & STANDAARDISATIE
+# =========================================================================
 def ensure_lock_columns(df):
     df_res = df.copy()
     for col in ALL_LOCK_COLS:
@@ -815,11 +984,6 @@ def update_team_division_across_sheets(sheets_dict, team_name, new_div_number):
 
 
 def reassign_invalid_referees_after_division_change(sheets_dict, affected_indices):
-    """
-    Hercontroleert en herplaatst scheidsrechters en tafelaars op wedstrijden
-    waarvan de divisie is gewijzigd, en logt alle vervangingen.
-    Plaatst automatisch een 'x' voor 24 sec operator als de nieuwe divisie > 3 is.
-    """
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"])
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"])
     div_key = find_sheet(sheets_dict, ["Divisions", "Divisies"])
@@ -912,7 +1076,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": reason_str
                 })
 
-        # Bij degradatie naar Div 4+ vervalt de 24 sec operator -> automatisch 'x' plaatsen
         if div_num > 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
@@ -926,7 +1089,6 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
                     "reason": f"Divisie {div_num} heeft geen 24-seconden operator nodig"
                 })
 
-        # Bij promotie naar Div 1-3 is 24 sec operator vereist (wis eventuele 'x' en herindel)
         if div_num <= 3 and "24 sec operator" in skp_df.columns:
             curr_24s = str(skp_df.at[idx, "24 sec operator"]).strip()
             if curr_24s.lower() == "x":
@@ -962,6 +1124,9 @@ def reassign_invalid_referees_after_division_change(sheets_dict, affected_indice
     return sheets_dict, change_logs
 
 
+# =========================================================================
+# CORE ROOSTER INDELING ALGORITME
+# =========================================================================
 def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, preserve_manual=False):
     skp_key = find_sheet(sheets_dict, ["SKP", "Rooster"]) or "SKP"
     players_key = find_sheet(sheets_dict, ["Players skp", "Players", "Spelers"]) or "Players"
@@ -1357,7 +1522,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                     })
 
         # --- TAFELTAKEN & 24 SEC OPERATOR ---
-        # Als de divisie > 3 is, is de 24 sec operator NIET nodig -> plaats automatisch een 'x'
         if div_num > 3:
             l_24s = bool(skp_df.at[idx, "Lock 24s"]) if "Lock 24s" in skp_df.columns else False
             if not l_24s:
@@ -1374,7 +1538,6 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 continue
 
             curr_val = str(skp_df.at[idx, col]).strip()
-            # Als er in Divisie 1-3 nog een 'x' stond op 24s, maak deze leeg om in te delen
             if col == "24 sec operator" and curr_val.lower() == "x":
                 curr_val = ""
                 skp_df.at[idx, col] = ""
@@ -1440,6 +1603,7 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
     st.session_state["auto_assigned_cells"] = auto_assigned
     sheets_dict[skp_key] = make_arrow_compatible(skp_df)
     sheets_dict = update_player_stats(sheets_dict)
+    save_persistent_state(sheets_dict)
     return sheets_dict, assignment_warnings
 
 
@@ -1459,7 +1623,9 @@ def auto_reassign_future_schedule(sheets_dict, days_ahead=7):
 
     if target_indices:
         current_max_tasks = st.session_state.get("slider_max_daily_tasks", 1)
-        return run_assignment_core(sheets_dict, target_indices, max_daily_tasks=current_max_tasks, preserve_manual=True)
+        res_sheets, warns = run_assignment_core(sheets_dict, target_indices, max_daily_tasks=current_max_tasks, preserve_manual=True)
+        save_persistent_state(res_sheets)
+        return res_sheets, warns
     return sheets_dict, []
 
 
@@ -1623,8 +1789,58 @@ def validate_schedule_rules(sheets_dict):
 
 
 # =========================================================================
-# FILE INLEZEN / VERWERKEN MET DIRECTE RERUN
+# INITIALISATIE: BESTAND LADEN (GOOGLE DRIVE OF UPLOAD)
 # =========================================================================
+def parse_and_load_bytes(file_bytes):
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    raw_sheets = {}
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
+
+    div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
+    div_map = (
+        build_division_map(raw_sheets[div_sheet_name])
+        if div_sheet_name
+        else {}
+    )
+
+    orig_sheets = {}
+    for sheet, df in raw_sheets.items():
+        if "player" in sheet.lower():
+            df = standardize_players_df(df)
+        elif "skp" in sheet.lower() and "player" not in sheet.lower():
+            df = standardize_skp_df(df, div_map=div_map)
+            for col in TASK_COLS:
+                if col in df.columns:
+                    df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+            df = sort_skp_schedule(df)
+        elif "game" in sheet.lower():
+            df = format_time_columns_in_df(df)
+        orig_sheets[sheet] = df
+    return orig_sheets
+
+
+# 1. Probeer bij app start eerst automatisch in te laden via Google Drive
+if "sheets" not in st.session_state:
+    drive_bytes = load_file_from_gdrive()
+    if drive_bytes:
+        st.session_state["file_bytes"] = drive_bytes
+        loaded_sheets = parse_and_load_bytes(drive_bytes)
+        st.session_state["original_sheets"] = copy.deepcopy(loaded_sheets)
+        st.session_state["sheets"] = copy.deepcopy(loaded_sheets)
+        st.session_state["indeling_gedaan"] = False
+        st.session_state["assignment_warnings"] = []
+        st.session_state["division_change_logs"] = []
+        st.session_state["validation_results"] = None
+        st.session_state["auto_assigned_cells"] = set()
+        st.sidebar.success("☁️ Live-rooster geladen vanuit Google Drive!")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload je Excel-bestand (optioneel)", type=["xlsx"], key="main_file_uploader"
+)
+
+# 2. Handmatige upload overschrijft of herinitialiseert lokaal en naar Google Drive
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
     curr_filename = getattr(uploaded_file, "name", "excel")
@@ -1639,40 +1855,16 @@ if uploaded_file is not None:
         st.session_state["file_bytes"] = file_bytes
         st.session_state["last_uploaded_filename"] = curr_filename
 
-        xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        raw_sheets = {}
-        for sheet in xls.sheet_names:
-            df = xls.parse(sheet)
-            raw_sheets[sheet] = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
-
-        div_sheet_name = find_sheet(raw_sheets, ["Divisions", "Divisies"])
-        div_map = (
-            build_division_map(raw_sheets[div_sheet_name])
-            if div_sheet_name
-            else {}
-        )
-
-        orig_sheets = {}
-        for sheet, df in raw_sheets.items():
-            if "player" in sheet.lower():
-                df = standardize_players_df(df)
-            elif "skp" in sheet.lower() and "player" not in sheet.lower():
-                df = standardize_skp_df(df, div_map=div_map)
-                for col in TASK_COLS:
-                    if col in df.columns:
-                        df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
-                df = sort_skp_schedule(df)
-            elif "game" in sheet.lower():
-                df = format_time_columns_in_df(df)
-            orig_sheets[sheet] = df
-
-        st.session_state["original_sheets"] = copy.deepcopy(orig_sheets)
-        st.session_state["sheets"] = copy.deepcopy(orig_sheets)
+        new_sheets = parse_and_load_bytes(file_bytes)
+        st.session_state["original_sheets"] = copy.deepcopy(new_sheets)
+        st.session_state["sheets"] = copy.deepcopy(new_sheets)
         st.session_state["indeling_gedaan"] = False
         st.session_state["assignment_warnings"] = []
         st.session_state["division_change_logs"] = []
         st.session_state["validation_results"] = None
         st.session_state["auto_assigned_cells"] = set()
+
+        upload_file_to_gdrive(file_bytes)
         st.rerun()
 
 
@@ -1695,6 +1887,8 @@ if "sheets" in st.session_state:
         sheets[skp_key] = standardize_skp_df(sheets[skp_key], div_map=tantalus_div_map)
     if all_games_key in sheets:
         sheets[all_games_key] = format_time_columns_in_df(sheets[all_games_key])
+
+    st.caption("☁️ **Google Drive Gekoppeld**: Alle aanpassingen en indelingen worden realtime gesynchroniseerd met Google Drive.")
 
     tab_names = list(sheets.keys())
     col_sel_sheet, _ = st.columns([1, 2])
@@ -1735,9 +1929,10 @@ if "sheets" in st.session_state:
             edited_df = handle_lock_all_synchronization(sheets[selected_tab], edited_df)
         sheets[selected_tab] = edited_df
         sheets = update_player_stats(sheets)
+        save_persistent_state(sheets)
         st.rerun()
 
-    # --- MELDINGENVENSTER VOOR DIVISIE WIJZIGINGEN & VERVANGEN SCHEIDSRECHTERS ---
+    # --- MELDINGENVENSTERS ---
     if st.session_state.get("division_change_logs"):
         with st.expander("🔄 Wijzigingenoverzicht: Vervangen taken & scheidsrechters na divisiewijziging", expanded=True):
             st.info("De divisie van een team is gewijzigd. Hieronder staan de posities die automatisch zijn aangepast of vervangen om aan de regels te voldoen:")
@@ -1747,7 +1942,6 @@ if "sheets" in st.session_state:
                     f"*(Reden: {log['reason']})*"
                 )
 
-    # --- MELDINGENVENSTER VOOR OPENSTAANDE PLEKKEN ---
     if st.session_state.get("assignment_warnings"):
         with st.expander("⚠️ Meldingenoverzicht: Waarom scheidsrechterplekken openstaan", expanded=False):
             st.error("Niet alle posities konden automatisch worden ingedeeld:")
@@ -1756,7 +1950,6 @@ if "sheets" in st.session_state:
                 for r_line in w["reasons"]:
                     st.write(f"- {r_line}")
 
-    # --- REGELVALIDATIE RESULTATEN VENSTER ---
     if st.session_state.get("validation_results") is not None:
         v_issues = st.session_state["validation_results"]
         if not v_issues:
@@ -1768,7 +1961,7 @@ if "sheets" in st.session_state:
                     st.markdown(f"- {issue}")
 
     # =========================================================================
-    # ZIJBALK STRUCTUUR
+    # ZIJBALK MENU'S (1 T/M 7)
     # =========================================================================
 
     # --- 1. MENU: LEDENBEHEER (INCL. TEAMBEHEER / DIVISIE WIJZIGEN) ---
@@ -1812,6 +2005,7 @@ if "sheets" in st.session_state:
                         sheets, change_logs = reassign_invalid_referees_after_division_change(
                             sheets, aff_indices
                         )
+                        save_persistent_state(sheets)
                         st.session_state["division_change_logs"] = change_logs
                         st.session_state["validation_results"] = None
                         if change_logs:
@@ -1852,6 +2046,7 @@ if "sheets" in st.session_state:
                             p_df_manage = insert_player_into_team(p_df_manage, new_team, new_row)
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
+                            save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
                             st.success(f"Lid {new_first} {new_last} toegevoegd aan team {new_team}! Rooster geüpdatet vanaf 7 dagen.")
@@ -1908,6 +2103,7 @@ if "sheets" in st.session_state:
                             p_df_manage.at[chosen_idx, "Team"] = edit_team
                             sheets[players_key] = standardize_players_df(p_df_manage)
                             sheets = update_player_stats(sheets)
+                            save_persistent_state(sheets)
                             sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=7)
                             st.session_state["assignment_warnings"] = warns
                             st.success("Gegevens gewijzigd! Rooster geüpdatet vanaf 7 dagen.")
@@ -1958,6 +2154,7 @@ if "sheets" in st.session_state:
 
                         sheets[players_key] = standardize_players_df(p_df_manage)
                         sheets = update_player_stats(sheets)
+                        save_persistent_state(sheets)
                         sheets, warns = auto_reassign_future_schedule(sheets, days_ahead=0)
                         st.session_state["assignment_warnings"] = warns
                         st.success(msg)
@@ -2008,6 +2205,7 @@ if "sheets" in st.session_state:
             if st.button("💾 Sla Commissies op & Synchroniseer", key="btn_save_comm_menu"):
                 sheets[players_key] = players_df
                 sheets = update_player_stats(sheets)
+                save_persistent_state(sheets)
                 st.session_state["action_feedback"] = (
                     "success",
                     "Commissies succesvol bijgewerkt!",
@@ -2089,6 +2287,7 @@ if "sheets" in st.session_state:
                             skp_df_games = sort_skp_schedule(skp_df_games)
                             sheets[skp_key] = make_arrow_compatible(skp_df_games)
                             sheets = update_player_stats(sheets)
+                            save_persistent_state(sheets)
                             st.success(f"Wedstrijd {m_home_input} vs {m_away_input} op {formatted_date_entry} om {t_str} chronologisch ingevoegd!")
                             st.rerun()
 
@@ -2124,6 +2323,7 @@ if "sheets" in st.session_state:
                         skp_df_games = ensure_day_spacing_in_skp(skp_df_games)
                         sheets[skp_key] = make_arrow_compatible(skp_df_games)
                         sheets = update_player_stats(sheets)
+                        save_persistent_state(sheets)
                         st.success("Wedstrijd succesvol verwijderd en taken bijgewerkt!")
                         st.rerun()
                 else:
@@ -2214,6 +2414,7 @@ if "sheets" in st.session_state:
         st.session_state["indeling_gedaan"] = True
         st.session_state["assignment_warnings"] = warns
         st.session_state["validation_results"] = None
+        save_persistent_state(sheets)
         if warns:
             st.warning("Indeling voltooid, maar er zijn openstaande posities. Bekijk het overzicht hierboven.")
         else:
@@ -2259,6 +2460,7 @@ if "sheets" in st.session_state:
                     st.session_state["validation_results"] = None
                     st.session_state["division_change_logs"] = []
                     st.session_state["auto_assigned_cells"] = set()
+                    save_persistent_state(sheets)
                     st.rerun()
 
             elif clear_mode == "Indeling wissen per dag":
@@ -2286,6 +2488,7 @@ if "sheets" in st.session_state:
                         st.session_state["assignment_warnings"] = []
                         st.session_state["validation_results"] = None
                         st.session_state["division_change_logs"] = []
+                        save_persistent_state(sheets)
                         st.rerun()
 
             else:
@@ -2320,6 +2523,7 @@ if "sheets" in st.session_state:
                         st.session_state["assignment_warnings"] = []
                         st.session_state["validation_results"] = None
                         st.session_state["division_change_logs"] = []
+                        save_persistent_state(sheets)
                         st.rerun()
 
     # --- 7. MENU: OPSLAAN & DOWNLOADEN ---
@@ -2395,4 +2599,4 @@ if "sheets" in st.session_state:
     )
 
 else:
-    st.info("👈 Upload je Excel-bestand in het linker menu om te beginnen.")
+    st.info("👈 Upload je Excel-bestand in het linker menu om te beginnen, of zorg dat 'SKP_Live_Database.xlsx' in je Google Drive map staat.")
