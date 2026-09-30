@@ -286,6 +286,15 @@ def normalize_time_str(val):
     return s
 
 
+def parse_time_minutes(val):
+    """Converteert een tijdswaarde naar het aantal minuten vanaf 00:00 uur."""
+    t_str = normalize_time_str(val)
+    m = re.match(r"^(\d{1,2}):(\d{2})$", t_str)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    return None
+
+
 def format_time_columns_in_df(df):
     df_clean = df.copy()
     for col in df_clean.columns:
@@ -679,6 +688,7 @@ def sort_skp_schedule(df):
 
 
 def build_team_busy_slots(all_games_df):
+    """Verzamelt alle tijdstippen waarop Tantalus-teams een eigen wedstrijd spelen."""
     busy_slots = set()
     if all_games_df is not None and not all_games_df.empty:
         col_home = find_col(all_games_df, ["home team", "thuis team", "home", "thuis"]) or "Home Team"
@@ -704,6 +714,7 @@ def build_team_busy_slots(all_games_df):
 
 
 def is_player_playing(player_team, date_val, time_val, curr_home, curr_away, busy_slots):
+    """Controleert of een speler exact op het tijdstip van een wedstrijd zelf moet spelen."""
     if not player_team or str(player_team).strip() in ["", "nan", "None"]:
         return False
     p_code = clean_team_code(player_team)
@@ -730,6 +741,50 @@ def is_player_playing(player_team, date_val, time_val, curr_home, curr_away, bus
             if p_code in b_team or b_team in p_code:
                 return True
     return False
+
+
+def has_match_time_conflict(player_team, date_val, match_time_val, curr_home, curr_away, busy_slots, min_hours_gap=4):
+    """
+    Controleert of een speler op dezelfde dag speelt én of er minstens `min_hours_gap` uur (standaard 4 uur)
+    zit tussen de eigen wedstrijd en de wedstrijd waarop hij/zij ingedeeld zou worden.
+    Retourneert: (heeft_conflict: bool, reden: str)
+    """
+    if not player_team or str(player_team).strip() in ["", "nan", "None"]:
+        return False, ""
+    p_code = clean_team_code(player_team)
+    if not p_code:
+        return False, ""
+
+    d_norm = normalize_date_str(date_val)
+    target_minutes = parse_time_minutes(match_time_val)
+    if target_minutes is None:
+        return False, ""
+
+    min_gap_minutes = min_hours_gap * 60
+
+    # 1. Speelt het team van de speler in deze specifieke wedstrijd zelf?
+    h_str = str(curr_home).lower()
+    a_str = str(curr_away).lower()
+    c_home = clean_team_code(h_str)
+    c_away = clean_team_code(a_str)
+
+    if ("tantalus" in h_str and (p_code == c_home or p_code in c_home or c_home in p_code)) or \
+       ("tantalus" in a_str and (p_code == c_away or p_code in c_away or c_away in p_code)):
+        return True, f"speelt zelf mee in deze wedstrijd om {normalize_time_str(match_time_val)}"
+
+    # 2. Zoek alle wedstrijden van het team op deze datum in busy_slots
+    for (b_team, b_d, b_t) in busy_slots:
+        if b_d == d_norm and (p_code in b_team or b_team in p_code):
+            game_minutes = parse_time_minutes(b_t)
+            if game_minutes is not None:
+                diff_min = abs(target_minutes - game_minutes)
+                if diff_min < min_gap_minutes:
+                    diff_hours = diff_min / 60.0
+                    return True, (
+                        f"speelt zelf om {b_t} met team *{player_team}* (tijdsverschil is slechts {diff_hours:.1f} uur, vereist is minstens {min_hours_gap} uur)"
+                    )
+
+    return False, ""
 
 
 def update_player_stats(sheets_dict):
@@ -1329,7 +1384,11 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                 return False
             if p_name in assigned_in_match:
                 return False
-            if is_player_playing(valid_players_dict[p_name]["Team"], m_date, m_time, home_team, away_team, busy_game_slots):
+            # Check 4-uur marge en of speler meespeelt
+            has_conflict, _ = has_match_time_conflict(
+                valid_players_dict[p_name]["Team"], m_date, m_time, home_team, away_team, busy_game_slots, min_hours_gap=4
+            )
+            if has_conflict:
                 return False
             if not is_player_eligible_for_date(valid_players_dict[p_name]["Season_Type"], m_date):
                 return False
@@ -1514,12 +1573,16 @@ def run_assignment_core(sheets_dict, target_match_indices, max_daily_tasks=1, pr
                         p_day_cnt = player_day_counts[p_name].get(d_norm, 0)
                         p_pts = p_info["Base_Points"] + (ref_tasks_counter[p_name] * 2) + (table_tasks_counter[p_name] * 1)
 
+                        has_gap_conflict, conflict_reason = has_match_time_conflict(
+                            p_team, m_date, m_time, home_team, away_team, busy_game_slots, min_hours_gap=4
+                        )
+
                         if (p_pts + 2.0) > 16.0:
                             reasons.append(f"**{p_name}** ({p_info['Diploma']}): Bereikt maximum van 16 punten ({p_pts} pnt).")
                         elif (d_norm, t_norm) in player_busy_times[p_name]:
                             reasons.append(f"**{p_name}** ({p_info['Diploma']}): Heeft al een taak om {t_norm}.")
-                        elif is_player_playing(p_team, m_date, m_time, home_team, away_team, busy_game_slots):
-                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): Speelt zelf met team *{p_team}*.")
+                        elif has_gap_conflict:
+                            reasons.append(f"**{p_name}** ({p_info['Diploma']}): {conflict_reason}.")
                         elif p_day_cnt >= max_daily_tasks:
                             reasons.append(f"**{p_name}** ({p_info['Diploma']}): Daglimiet van {max_daily_tasks} ta(a)k(en) bereikt.")
                         elif not is_player_eligible_for_date(p_info["Season_Type"], m_date):
@@ -1789,8 +1852,11 @@ def validate_schedule_rules(sheets_dict):
             if person in player_meta:
                 p_info = player_meta[person]
 
-                if is_player_playing(p_info["team"], date_str, time_str, home, away, busy_game_slots):
-                    violations.append(f"{match_label}: {person} staat ingedeeld als **{col_name}**, maar moet zelf spelen met team *{p_info['team']}*.")
+                has_gap_conflict, conflict_reason = has_match_time_conflict(
+                    p_info["team"], date_str, time_str, home, away, busy_game_slots, min_hours_gap=4
+                )
+                if has_gap_conflict:
+                    violations.append(f"{match_label}: {person} staat ingedeeld als **{col_name}**, maar {conflict_reason}.")
 
                 if not is_player_eligible_for_date(p_info["season_type"], date_str):
                     violations.append(f"{match_label}: {person} ({col_name}) is niet actief op {date_str} volgens seizoenshelft ({p_info['season_type']}).")
@@ -1935,7 +2001,6 @@ if "sheets" in st.session_state:
                 default=False,
             )
 
-    # Breedte op stretch en hoogte op 850px voor maximale schermweergave
     edited_df = st.data_editor(
         display_df,
         num_rows="dynamic",
@@ -1974,7 +2039,7 @@ if "sheets" in st.session_state:
     if st.session_state.get("validation_results") is not None:
         v_issues = st.session_state["validation_results"]
         if not v_issues:
-            st.success("✅ **Het rooster voldoet aan alle regels!** Geen dubbele boekingen, diploma-conflicten of openstaande taken.")
+            st.success("✅ **Het rooster voldoet aan alle regels!** Geen dubbele boekingen, diploma-conflicten, rusttijd-conflicten (< 4 uur) of openstaande taken.")
         else:
             with st.expander(f"❌ **Regelvalidatie: {len(v_issues)} knelpunten gevonden**", expanded=False):
                 st.error("De volgende toewijzingen of posities voldoen niet aan de regels van het systeem:")
@@ -2439,13 +2504,13 @@ if "sheets" in st.session_state:
         if warns:
             st.warning("Indeling voltooid, maar er zijn openstaande posities. Bekijk het overzicht hierboven.")
         else:
-            st.success("Indeling succesvol en evenwichtig uitgevoerd (max. 16 punten per lid)!")
+            st.success("Indeling succesvol en evenwichtig uitgevoerd (max. 16 punten per lid, min. 4 uur tussen eigen wedstrijden)!")
         st.rerun()
 
     # --- 5. MENU: ROOSTER VALIDEREN ---
     st.sidebar.divider()
     with st.sidebar.expander("🔍 5. Rooster Valideren", expanded=False):
-        st.caption("Controleer of de huidige indeling voldoet aan alle regels (dubbele boekingen, licenties, speeltijden, max. punten).")
+        st.caption("Controleer of de huidige indeling voldoet aan alle regels (dubbele boekingen, licenties, 4-uur rust marge, max. punten).")
         if st.button("🔍 Valideer Rooster", key="btn_validate_rules"):
             val_issues = validate_schedule_rules(sheets)
             st.session_state["validation_results"] = val_issues
@@ -2463,7 +2528,7 @@ if "sheets" in st.session_state:
             )
 
             if clear_mode == "Hele rooster wissen":
-                if st.button("🗑️ Wis het hele rooster (excl. 🔒)", key="btn_clear_all_grid"):
+                if st.button("🗑️️ Wis het hele rooster (excl. 🔒)", key="btn_clear_all_grid"):
                     for t_c in TASK_COLS:
                         l_col = LOCK_MAP[t_c]
                         if t_c in skp_df_clear.columns:
